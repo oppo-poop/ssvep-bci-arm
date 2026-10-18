@@ -1,0 +1,22 @@
+# 回收站（临时日志，曾误入暂存区 305 项）
+.Trash-0/
+
+# 工具与记忆目录
+.workbuddy/
+.claude/
+.vscode/
+
+# 第三方 SDK 与参考实现（176 MB）
+参考资料/
+
+# star-arm-moveit2 是独立仓库（有 upstream remote），单独提交
+star-arm-moveit2/
+
+# Python
+__pycache__/
+*.pyc
+
+# 运行产物
+*.log
+.sim.pids
+.robot.pids
