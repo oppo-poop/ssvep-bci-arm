@@ -47,6 +47,9 @@ INTENT_MAP = {
     4: ("stop",  None),                    # 停止块：不动作
 }
 
+#: ssvep-bci 的实时状态文件（它每帧写，含解码结果）
+DEFAULT_STATUS = SCRIPTS.parent.parent / "ssvep-bci" / "run_status.json"
+
 WAIT_S = 25           # 单条动作等待上限
 COOLDOWN_S = 1.0      # 两次动作之间的最小间隔
 CONF_MIN = 0.30       # 低于此置信度直接丢弃
@@ -87,6 +90,48 @@ def parse_line(line):
     return k, conf
 
 
+def iter_status(path, poll=0.08):
+    """轮询 ssvep-bci 的 run_status.json，意图变化时产出一行 "k conf"。
+
+    为什么用 `locked` 而不是 `k`：
+        k 是逐帧解码结果，锁定期间遇到空闲窗口会短暂变 None；
+        locked 是解码器内部稳定后的值，只在真正换向时变化——
+        正好对应"一次意图 → 一次动作"，不会因为抖动重复触发。
+    """
+    import json
+
+    if not path.is_file():
+        log("⚠ 状态文件不存在：%s" % path)
+        log("  先在 ssvep-bci 里跑 realtime.py，它会持续写这个文件")
+
+    last = object()          # 哨兵：第一次读到也要按"变化"处理
+    missing_since = None
+    while True:
+        try:
+            st = json.loads(path.read_text(encoding="utf-8"))
+            missing_since = None
+        except FileNotFoundError:
+            now = time.time()
+            if missing_since is None:
+                missing_since = now
+            elif now - missing_since > 5.0:
+                log("⚠ 等 %s 已超 5 秒（realtime.py 在跑吗？）" % path.name)
+                missing_since = now
+            time.sleep(poll)
+            continue
+        except Exception:
+            # 写入过程中读到半截，跳过这一轮
+            time.sleep(poll)
+            continue
+
+        cur = st.get("locked")
+        if cur != last:
+            last = cur
+            if cur is not None:
+                yield "%d %s" % (int(cur), st.get("rho") or 0.0)
+        time.sleep(poll)
+
+
 def iter_intents(args):
     if args.replay:
         for chunk in args.replay.replace(";", ",").split(","):
@@ -105,11 +150,16 @@ def main():
         description="把 SSVEP 类别判定翻译成机械臂动作")
     ap.add_argument("--replay", metavar="SEQUENCE",
                     help="回放序列，如 \"0,1,0,2\"；不给则从 stdin 读")
+    ap.add_argument("--status", nargs="?", const=str(DEFAULT_STATUS), default=None,
+                    metavar="PATH",
+                    help="轮询 ssvep-bci 的 run_status.json（不给路径则用默认位置）")
     ap.add_argument("--dry-run", action="store_true", help="只打印不执行")
     ap.add_argument("--conf-min", type=float, default=CONF_MIN,
                     help="置信度下限，默认 %.2f" % CONF_MIN)
     ap.add_argument("--cooldown", type=float, default=COOLDOWN_S,
                     help="两次动作最小间隔（秒），默认 %.1f" % COOLDOWN_S)
+    ap.add_argument("--max", type=int, default=0, metavar="N",
+                    help="处理 N 个意图后退出（0 = 一直跑）。测试和定长演示用")
     ap.add_argument("--stop-on-fail", action="store_true",
                     help="任一动作失败即退出（默认继续）")
     args = ap.parse_args()
@@ -118,14 +168,20 @@ def main():
         print("✗ 找不到 %s" % CLI, file=sys.stderr)
         return 2
 
-    log("意图桥启动（%s）" % ("回放" if args.replay else "stdin"))
+    src_desc = ("状态文件 %s" % Path(args.status).name if args.status
+                else ("回放" if args.replay else "stdin"))
+    log("意图桥启动（%s）" % src_desc)
     log("%-4s %-8s %-8s %-6s %s" % ("#", "类别", "动作", "耗时", "结果"))
     log("-" * 62)
 
     n_ok = n_skip = n_fail = 0
     last_end = 0.0
 
-    for i, raw in enumerate(iter_intents(args), 1):
+    source = iter_status(Path(args.status)) if args.status else iter_intents(args)
+    for i, raw in enumerate(source, 1):
+        if args.max and i > args.max:
+            log("已处理 %d 个，退出（--max %d）" % (i - 1, args.max))
+            break
         parsed = parse_line(raw)
         if parsed is None:
             log("%-4d %-8s %-8s %-6s 跳过（无法解析）" % (i, raw, "-", "-"))

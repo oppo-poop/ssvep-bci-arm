@@ -20,3 +20,6 @@ __pycache__/
 *.log
 .sim.pids
 .robot.pids
+
+# 取放连跑的逐次日志（26+ 个）；只保留 summary.csv 这一张汇总表
+data/runs/*.log

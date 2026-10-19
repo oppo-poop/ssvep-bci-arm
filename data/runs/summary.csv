@@ -1,0 +1,26 @@
+time,scene,result,total_s,failed_at,log
+10-19 16:22:29,data/scene_real.yaml,（无摘要，rc=1）,-,-,data/runs/1019-162151.log
+10-19 16:22:58,data/scene_real.yaml,（无摘要，rc=120）,-,-,data/runs/1019-162231.log
+10-19 16:25:45,data/scene_real.yaml,在「合爪夹持」（合爪阶段）失败，4/5 步通过,67.0,合爪夹持,data/runs/1019-162438.log
+10-19 16:25:49,data/scene_real.yaml,（无摘要，rc=120）,-,-,data/runs/1019-162547.log
+10-19 16:25:53,data/scene_real.yaml,（无摘要，rc=120）,-,-,data/runs/1019-162551.log
+10-19 16:25:56,data/scene_real.yaml,（无摘要，rc=120）,-,-,data/runs/1019-162555.log
+10-19 16:25:59,data/scene_real.yaml,（无摘要，rc=120）,-,-,data/runs/1019-162558.log
+10-19 16:34:12,data/scene_real.yaml,（无摘要，rc=120）,-,-,data/runs/1019-163018.log
+10-19 16:34:16,data/scene_real.yaml,（无摘要，rc=120）,-,-,data/runs/1019-163414.log
+10-19 16:34:19,data/scene_real.yaml,（无摘要，rc=120）,-,-,data/runs/1019-163418.log
+10-19 16:34:22,data/scene_real.yaml,（无摘要，rc=120）,-,-,data/runs/1019-163421.log
+10-19 16:34:25,data/scene_real.yaml,（无摘要，rc=120）,-,-,data/runs/1019-163424.log
+10-19 16:38:03,data/scene_real.yaml,全部 11 步通过,148.5,-,data/runs/1019-163534.log
+10-19 16:39:11,data/scene_real.yaml,全部 11 步通过,66.0,-,data/runs/1019-163805.log
+10-19 16:40:18,data/scene_real.yaml,全部 11 步通过,64.7,-,data/runs/1019-163913.log
+10-19 16:41:24,data/scene_real.yaml,全部 11 步通过,64.2,-,data/runs/1019-164020.log
+10-19 16:42:34,data/scene_real.yaml,全部 11 步通过,68.1,-,data/runs/1019-164126.log
+10-19 16:43:49,data/scene_real.yaml,全部 11 步通过,68.0,-,data/runs/1019-164241.log
+10-19 16:45:00,data/scene_real.yaml,全部 11 步通过,69.4,-,data/runs/1019-164351.log
+10-19 16:46:08,data/scene_real.yaml,全部 11 步通过,65.5,-,data/runs/1019-164502.log
+10-19 16:48:24,data/scene_real.yaml,全部 11 步通过,60.9,-,data/runs/1019-164723.log
+10-19 16:49:24,data/scene_real.yaml,全部 11 步通过,58.0,-,data/runs/1019-164826.log
+10-19 16:49:57,data/scene_real.yaml,全部 11 步通过,30.6,-,data/runs/1019-164926.log
+10-19 16:50:31,data/scene_real.yaml,全部 11 步通过,31.7,-,data/runs/1019-164959.log
+10-19 16:51:03,data/scene_real.yaml,全部 11 步通过,30.3,-,data/runs/1019-165033.log

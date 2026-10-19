@@ -123,12 +123,28 @@ def main():
                     help="预设：zero=标定零位，park=折叠收纳姿态")
     ap.add_argument("--unlock", action="store_true",
                     help="到达后解除全部扭矩（收纳/断电前用；臂会掉）")
+    ap.add_argument("--fast", action="store_true",
+                    help="快速模式：步长 30°、每步 1 s、容差 10°、最多 6 步。"
+                         "适合收纳这种不需要精确的大动作（约 5 秒走完 90°）")
     ap.add_argument("--step-deg", type=float, default=STEP_DEG)
+    ap.add_argument("--step-ms", type=int, default=STEP_MS,
+                    help="单步耗时（毫秒），默认 %d。越大越慢越稳" % STEP_MS)
     ap.add_argument("--max-steps", type=int, default=MAX_STEPS,
                     help="最多走几步；每步最大 --step-deg 度。默认 %d" % MAX_STEPS)
     ap.add_argument("--tol", type=float, default=TOL_DEG)
     ap.add_argument("--yes", action="store_true", help="跳过确认")
     args = ap.parse_args()
+
+    if args.fast:
+        # 只放宽"没显式指定"的项：命令行给了值就以命令行为准
+        if "--step-deg" not in sys.argv:
+            args.step_deg = 30.0
+        if "--step-ms" not in sys.argv:
+            args.step_ms = 1000
+        if "--tol" not in sys.argv:
+            args.tol = 10.0
+        if "--max-steps" not in sys.argv:
+            args.max_steps = 6
 
     if args.preset and args.target:
         die("--preset 和 --target 只能给一个")
@@ -212,8 +228,8 @@ def main():
             target.append(hold_j7)
             print("  步 %2d  目标: %s  最大差 %.2f°"
                   % (step, " ".join("%+6.2f" % t for t in target[:6]), worst))
-            send_targets(mgr, target, STEP_MS)
-            time.sleep(STEP_MS / 1000.0 + 0.3)
+            send_targets(mgr, target, args.step_ms)
+            time.sleep(args.step_ms / 1000.0 + 0.25)
         else:
             print("\n⚠ 达到 %d 步上限仍未收敛，停在当前位置。再跑一次会继续逼近。" % args.max_steps)
 

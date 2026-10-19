@@ -1,0 +1,11 @@
+# 示教值（2026-10-18 21:37 手工指定夹爪参数）
+# grip_open / grip_close 是比例：0 = 合到底(8 mm)，1 = 全开(65 mm)
+pick: [0.3980, 0.0012, 0.0926]
+place: [0.3972, -0.2510, 0.0992]
+object_height: 0.070
+object_width: 0.050
+grip_open: 1.00      # 张：65 mm（全开）
+grip_close: 0.70     # 夹：约 48 mm（物宽 50，过盈 2 mm）
+standoff: 0.050
+clearance: 0.02
+verify_grasp: false

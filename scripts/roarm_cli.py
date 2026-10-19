@@ -38,7 +38,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
-from robo_interfaces.msg import PositionOrientation, GripperCommand
+from robo_interfaces.msg import PositionOrientation, GripperCommand, SetAngle
 from sensor_msgs.msg import JointState
 
 # 工程 README 记录的 4 个 Cello 路点（位置，米，世界系）
@@ -52,16 +52,27 @@ WAYPOINTS = {
 # 零位末端姿态（2026-10-17 实测 world->link6）
 DEFAULT_QUAT = (0.5, -0.5, 0.5, -0.5)
 
-# 任务工作区（README §七）。越界默认拒绝，--force 可越过。
+# 任务工作区（README §七 的"推荐工作区"）。**这不是机械极限**：
+# y 方向左 -0.324 / 右 +0.113 左右不对称，真实机械不可能这样，
+# 说明它只是上位机作者划的建议作业区。越界默认拒绝，--force 可越过；
+# 示教（teach.py --force）时应该越过，自动执行时保持保守。
 BOUNDS = {"x": (0.278, 0.529), "y": (-0.324, 0.113), "z": (0.074, 0.438)}
 
-# 夹爪：arm_moveit_write 发的是舵机角度（open=100°, close=0°），
-# sim_gripper_bridge 再换算成关节位置（米）。2026-10-17 实测对应关系：
-#   100° -> joint7_left =  0.000 m   （URDF 里两指合拢，间距 0 mm）
-#     0° -> joint7_left = -0.025 m   （限位下限，两指张开 50 mm）
-# ⚠ 即命令名与物理开合方向相反。这里按“当前实现的实测值”校验，不改语义，
-#   口径待定，见 docs/仿真使用与测试.md §六。
+# 夹爪：arm_moveit_write 发的是舵机角度，换算 joint7_left = (deg-100)/100*0.032。
+# URDF 限位 lower=-0.025 / upper=0，所以可用区间是舵机 21.9°~100°。
+# **2026-10-18 实物实测方向**（推翻了 10-17 从仿真推出的结论）：
+#   100.0° -> joint7_left =  0.000 m   （两指张开约 50 mm）    ← CLI "open"
+#    50.0° -> joint7_left = -0.016 m   （约 18 mm）            ← driver 启动位
+#    21.9° -> joint7_left = -0.025 m   （两指合拢 0 mm）       ← CLI "close"
+# 即 pos 越负越合拢；open/close 是自然语义，不再"名字相反"。
+# ⚠ 舵机 0° 会算出 -0.032 m，**超 URDF 下限 28%**；一旦超限，MoveIt 会把整个
+#   机器人状态判为 invalid，OMPL 报 "Skipping invalid start state"，之后所有规划
+#   全部失败（表现为"发任何目标都不动"）。2026-10-18 实际踩到：arm_moveit_write
+#   的 close 分支原来发 0.0°，已改为 21.9°。
 GRIP_EXPECT = {"open": 0.0, "close": -0.025}
+
+#: 夹爪舵机可用角度区间。低于 21.9° 会让 joint7_left 超出 URDF 下限（见上）。
+GRIP_DEG_MIN, GRIP_DEG_MAX = 21.9, 100.0
 
 JOINT_NAMES = [f"joint{i}" for i in range(1, 7)]
 BASE_FRAME = "world"
@@ -75,6 +86,8 @@ class RoArmCli(Node):
         super().__init__("roarm_cli")
         self.pose_pub = self.create_publisher(PositionOrientation, "position_orientation_topic", 10)
         self.grip_pub = self.create_publisher(GripperCommand, "gripper_command_topic", 10)
+        # 直接发舵机角度。GripperCommand 只有一个字符串，做不到"半开"。
+        self.set_angle_pub = self.create_publisher(SetAngle, "set_angle_topic", 10)
         self.joint_positions = None
         self.gripper_pos = None
         self.create_subscription(JointState, "joint_states", self._on_joint_state, 10)
@@ -90,11 +103,25 @@ class RoArmCli(Node):
 
     # ---------- 通信 ----------
     def wait_for_subscribers(self, timeout=5.0):
+        """等三条话题的订阅者都出现。
+
+        为什么必须全等：pose 的订阅者（arm_moveit_write）长期在线，
+        只等它的话会立刻返回；而 set_angle（robo_driver 订阅）的 DDS 发现可能
+        还没完成，此时发的 grip_deg 会**静默丢失**——夹爪不动，joint7_left 不变，
+        表现为"张开马上 OK、合爪超时"。2026-10-19 实际踩到。
+        """
         deadline = time.time() + timeout
+        pubs = (("pose", self.pose_pub),
+                ("set_angle", self.set_angle_pub),
+                ("gripper", self.grip_pub))
         while time.time() < deadline:
             rclpy.spin_once(self, timeout_sec=0.1)
-            if self.pose_pub.get_subscription_count() > 0:
+            if all(p.get_subscription_count() > 0 for _, p in pubs):
                 return True
+        # 超时：说清哪个话题没人听，别让人去猜
+        missing = [n for n, p in pubs if p.get_subscription_count() == 0]
+        if missing:
+            print("⚠ 这些话题没有订阅者：%s" % "、".join(missing))
         return False
 
     def send_pose(self, xyz, quat):
@@ -107,6 +134,18 @@ class RoArmCli(Node):
         msg = GripperCommand()
         msg.command = cmd
         self.grip_pub.publish(msg)
+
+    def send_grip_deg(self, deg):
+        """直接发夹爪舵机角度，绕过 GripperCommand 的二值限制。
+
+        robo_driver 订阅 set_angle_topic 后直接驱动舵机，joint_states 会跟着更新，
+        所以 MoveIt 仍能看到合法状态。示教时用它做连续开度。
+        """
+        msg = SetAngle()
+        msg.servo_id = [6]
+        msg.target_angle = [float(deg)]
+        msg.time = [1000]
+        self.set_angle_pub.publish(msg)
 
     # ---------- 观测 ----------
     def ee_position(self):
@@ -216,6 +255,10 @@ def report(node, xyz, quat, timeout, tol_mm):
         print("  关节角(度): " + "  ".join("j%d=%7.2f" % (i + 1, d) for i, d in enumerate(ang)))
     if ok:
         print("  ✅ 到位  误差 %.2f mm  用时 %.1f s" % (err_mm, elapsed))
+        # 到位也打印实测位置：重复定位精度要的是"落在哪"，不是"差多少"。
+        # 只增一行、不动既有字段，sim_test.py / link.py 仍只认退出码。
+        if pos:
+            print("     实际 x=%.4f y=%.4f z=%.4f" % pos)
         return EXIT_OK
     if err_mm is None:
         print("  ❌ 未拿到末端位姿（TF %s->%s 不可用），无法校验" % (BASE_FRAME, EE_FRAME))
@@ -253,7 +296,7 @@ def handle(node, argv, force, timeout, tol_mm):
         if pose is None:
             print("❌ 拿不到 %s->%s，TF 不可用（执行节点没起？）" % (BASE_FRAME, EE_FRAME))
             return EXIT_FAIL
-        print("当前位置 x=%.3f y=%.3f z=%.3f" % pose[:3])
+        print("当前位置 x=%.4f y=%.4f z=%.4f" % pose[:3])
         print("            q=(%.3f, %.3f, %.3f, %.3f)" % pose[3:])
         if node.gripper_pos is not None:
             print("夹爪 joint7_left=%.4f m" % node.gripper_pos)
@@ -265,12 +308,41 @@ def handle(node, argv, force, timeout, tol_mm):
 
     if op in ("grip", "gripper"):
         if len(argv) < 2 or argv[1] not in GRIP_EXPECT:
-            print("用法：grip open|close")
+            print("用法：grip open|close   （要半开用 grip_deg <角度>）")
             return EXIT_REJECT
         cmd = argv[1]
         node.send_grip(cmd)
         target = GRIP_EXPECT[cmd]
         print("→ 夹爪 %s（目标 joint7_left = %.3f m）" % (cmd, target))
+
+    elif op in ("grip_deg", "gripdeg"):
+        if len(argv) < 2:
+            print("用法：grip_deg <舵机角度>   可用 %.1f ~ %.1f°"
+                  % (GRIP_DEG_MIN, GRIP_DEG_MAX))
+            return EXIT_REJECT
+        try:
+            deg = float(argv[1])
+        except ValueError:
+            print("不是数值：%s" % argv[1])
+            return EXIT_REJECT
+        if not (GRIP_DEG_MIN <= deg <= GRIP_DEG_MAX):
+            print("拒绝：%.1f° 超出可用范围 [%.1f, %.1f]"
+                  % (deg, GRIP_DEG_MIN, GRIP_DEG_MAX))
+            print("  joint7_left = (deg-100)/100*0.032，超限会让 MoveIt 把整机状态判为非法，"
+                  "之后所有规划都会失败")
+            return EXIT_REJECT
+        node.send_grip_deg(deg)
+        target = (deg - 100.0) / 100.0 * 0.032
+        # 两指间距：实测行程 8~65 mm 对应 joint7_left -0.025~0
+        gap = 8.0 + (target + 0.025) * (57.0 / 0.025)
+        print("→ 夹爪 %.1f°（目标 joint7_left = %.4f m，两指间距约 %.0f mm）"
+              % (deg, target, gap))
+
+    else:
+        target = None
+
+    if target is not None:
+        # 夹爪命令（grip / grip_deg）共用这段等待逻辑
         if timeout <= 0:
             return EXIT_OK
         ok, err, elapsed = node.wait_for_gripper(target, timeout, tol_mm)
@@ -317,7 +389,9 @@ def main():
                     help="等待到达的最长秒数；给了就用 TF 校验并返回退出码")
     ap.add_argument("--tol", type=float, default=5.0, help="到位容差（毫米），默认 5")
     ap.add_argument("--force", action="store_true", help="跳过任务工作区检查")
-    ap.add_argument("--timeout", type=float, default=5.0, help="等待订阅者连接的秒数")
+    ap.add_argument("--timeout", type=float, default=2.0,
+                    help="等待订阅者连接的秒数。原来是 5 秒，但 task 每步新建一次 CLI，"
+                         "11 步光等发现就烧掉 55 秒。2 秒够用；若出现丢命令再加回去")
     args = ap.parse_args()
 
     rclpy.init()

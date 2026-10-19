@@ -139,10 +139,12 @@ start_all() {
   echo "$demo_pid" >> "$PIDFILE"
   wait_for_log "$DEMOLOG" "You can start planning" 45 "move_group" || { stop_all; exit 1; }
 
-  # ---- 4) 执行节点，速度压到 0.05
-  msg "启动执行节点（velocity_scaling=0.05）…"
+  # ---- 4) 执行节点。默认 0.05（约 3 mm/s，安全但慢）；
+  #         示教/粗定位可以 VELOCITY=0.15 bash scripts/robot_up.sh（约 9 mm/s）
+  local vel="${VELOCITY:-0.05}"
+  msg "启动执行节点（velocity_scaling=$vel）…"
   setsid ros2 launch cello_moveit_config arm_moveit_write.launch.py \
-    velocity_scaling:=0.05 > "$NODELOG" 2>&1 &
+    velocity_scaling:="$vel" > "$NODELOG" 2>&1 &
   local node_pid=$!
   echo "$node_pid" >> "$PIDFILE"
   wait_for_log "$NODELOG" "ArmMoveitControl ready" 20 "arm_moveit_write" || { stop_all; exit 1; }
