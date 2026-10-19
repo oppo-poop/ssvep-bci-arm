@@ -1,0 +1,14 @@
+# 演示场景：从工作区左下角取一个 30 mm 宽、50 mm 高的方块，放到中部。
+#
+# ⚠ pick / place 是 README 路点的占位值，不是标定值。
+#   真机上必须先量一遍再改这里。
+
+name: demo
+pick: [0.330, -0.324, 0.074]
+place: [0.400, 0.100, 0.200]
+
+object_height: 0.05    # 物体高度，决定抬起量 = 高度 + clearance
+object_width: 0.03     # 物体宽度，抓取校验时用来判断夹爪该停多开
+standoff: 0.08         # 接近/撤离时高出目标多少（太小会擦着物体平移）
+clearance: 0.06        # 抬起后离台面的净空
+verify_grasp: false    # 仿真里必须 false：FakeSystem 不模拟接触

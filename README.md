@@ -130,7 +130,7 @@ ssvep-Roarm/
 │   ├── repeatability.csv    重复精度原始样本
 │   └── joint_limits.csv     六轴行程实测
 ├── docs/                    文档（`00-索引.md` 是入口）
-├── star-arm-moveit2/        ROS 2 工作区（独立仓库）
+├── star-arm-moveit2/        ROS 2 工作区（源码已并入本仓库，build/install 不入库）
 └── 参考资料/                 厂商 SDK、官方示例（不入库）
 ```
 

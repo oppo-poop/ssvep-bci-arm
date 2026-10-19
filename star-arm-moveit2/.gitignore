@@ -1,0 +1,14 @@
+build
+install
+log
+.vscode
+.workbuddy
+__pycache__
+*.pyc
+
+# 运行产物（sim_up.sh / robot_up.sh 产生）
+.robot.pids
+.robot_*.log
+.sim.pids
+.sim_*.log
+.simtest_*.log

@@ -9,8 +9,8 @@
 # 第三方 SDK 与参考实现（176 MB）
 参考资料/
 
-# star-arm-moveit2 是独立仓库（有 upstream remote），单独提交
-star-arm-moveit2/
+# star-arm-moveit2 已并入本仓库（原为独立仓库，2026-10-19 合并）
+# 它自己的 .gitignore 会排除 build/ install/ log/，不用在这里重复
 
 # Python
 __pycache__/
