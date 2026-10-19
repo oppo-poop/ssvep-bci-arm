@@ -137,6 +137,12 @@ ssvep-Roarm/
 ## 快速开始
 
 ```bash
+# 首次（新 clone 必须做一次；之后改了源码也要重跑）
+cd star-arm-moveit2
+colcon build
+cd ..
+# ⚠ 本机 /tmp 只有 10 MB，要指定 TMPDIR=/home/ljl/cctmp，否则报"设备上没有空间"
+
 # 仿真
 bash scripts/sim_up.sh
 ros2 run roarm_task task --dry-run
