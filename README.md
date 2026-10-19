@@ -83,6 +83,7 @@ DEFAULT_ACC_TIME / DEC_TIME = 50 ms    ← 脑控场景应显式放长
 | 眼动暂缓 | Tobii/Gazepoint/七鑫易维 Linux 全不支持；L2CS-Net 精度有限还要单独标定 |
 | 闪烁框位置**冻结** N 秒 | 避免同时面对"检测抖动"和"动态刺激"两个未知量 |
 | 任务层调 CLI 子进程，不直接发 ROS | 到位判据只保留一份（TF 实测 + 三档退出码），避免两套判据漂移 |
+| 取消 = 冻结当前角度，不是急停 | 舵机没有急停指令。cancel 只能让舵机停在原地，真正断电仍靠电源开关 |
 
 ## 已修 / 未修
 
@@ -96,6 +97,7 @@ DEFAULT_ACC_TIME / DEC_TIME = 50 ms    ← 脑控场景应显式放长
 | 任务层容差 5 mm 严于实测精度 | 改 15 mm（home 单独 25 mm）。原来第 1 步回位就必然失败 |
 | 绝对定位误差 10~11 mm | 加**二次定位补偿**（目标 = 2×原目标 − 实测），落点压到 2.5 mm |
 | 执行异常绕过回位 | `sequence.run` 包 try/except，代码崩了也走"停 + 回位" |
+| `cello_controller` 不响应取消请求 | **已实现，未真机验证**：cancel 回调立即下发"保持当前角度"（time=100 ms），execute 每次等待改成 10 ms 分片并检查 `is_cancel_requested`。仍不是急停——断电才是 |
 | joint6 限速 13.14→3.14 / 加速度限值打开 | 见 `star-arm-moveit2` 的 commit |
 | `sensors_3d` 非空导致 move_group 静默死 | 置为 `[]`；IK 超时 0.005→0.05 s；零位偏移补偿 |
 
@@ -103,7 +105,6 @@ DEFAULT_ACC_TIME / DEC_TIME = 50 ms    ← 脑控场景应显式放长
 
 | 问题 | 后果 |
 |---|---|
-| `cello_controller` 不检查 `is_cancel_requested` | **软件停不下来**，急停只能断电。意图层的 STOP 块因此只保证"不再发新指令" |
 | `robo_driver` 上电无条件 `reset_multi_turn_angle` + 驱到零位 | 启动瞬间断电 50 ms，臂会掉一点 |
 | URDF `velocity="1"`(57°/s) 与 yaml `3.14`(180°/s) 不一致 | 限速依据有两份 |
 | 舵机型号表缺 `ra8-u26`，LeRobot 全声明为 `rx8-u50` | 若用型号握手校验，真机可能报错 |

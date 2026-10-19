@@ -86,17 +86,45 @@ class RoboActionClient(Node):
         self.get_logger().info(f"{ROBO_ACTION_NODE} is ready.")  # 节点就绪日志 / ready log
         self.current_angle = [0.0] * 7  # 当前舵机角度缓存 / current servo angles
         self.last_time = 0  # 上一次时间戳 / last trajectory time index
+        # 是否收到过 joint_states。下发"保持当前角度"前必须确认：
+        # current_angle 的初值全是 0.0，未收到状态时发出去等于命令所有关节转到 0°。
+        self._have_state = False
 
     def arm_cancel_callback(self, cancel_request):
         """处理机械臂动作取消请求 / handle cancel request"""
         self.get_logger().info('Received arm cancel request')
+        # 利用 ReentrantCallbackGroup + MultiThreadedExecutor，这里能和 execute 并发跑，
+        # 所以能比 execute 里的检查更早把舵机停住。
+        self._hold_current('cancel')
         return CancelResponse.ACCEPT
+
+    def _hold_current(self, why):
+        """把当前角度当目标发出去，让舵机以最快速度原地停住。
+
+        舵机没有急停命令，只能把"当前位置"当目标下发（time 100 ms），
+        等价于冻结。真正的断电急停仍然只能靠电源开关。
+        """
+        if not self._have_state:
+            self.get_logger().warn(
+                f'arm {why}: 尚未收到 joint_states，跳过保持（避免把 0° 当成目标）')
+            return
+        try:
+            hold = SetAngle(
+                servo_id=list(range(7)),
+                target_angle=[float(a) for a in self.current_angle],
+                time=[100] * 7,
+            )
+            self.set_angle_publisher.publish(hold)
+            self.get_logger().warn(f'arm {why}: 已下发保持当前角度')
+        except Exception as exc:                       # noqa: BLE001
+            self.get_logger().error(f'arm {why}: 保持当前角度失败 {exc}')
 
     def current_angle_callback(self, msg):
         """接收并转换 JointState 到舵机角度 / receive joint states"""
         for name, pos in zip(msg.name, msg.position):
             idx = ROBO_TYPE_1_INDEX_JOINT_[name]
             self.current_angle[idx] = jointstate2servoangle(idx, pos)
+        self._have_state = True
 
     def arm_execute_callback(self, goal_handle):
         """执行轨迹点 / execute trajectory points"""
@@ -121,7 +149,25 @@ class RoboActionClient(Node):
                 idx = ROBO_TYPE_1_INDEX_JOINT_[name]
                 msg.target_angle[idx] = jointstate2servoangle(idx, angle)
             self.set_angle_publisher.publish(msg)  # 发布命令 / publish command
-            time.sleep(duration)  # 等待完成 / wait
+
+            # 分段等待：原来整段 time.sleep(duration) 期间取消请求只能等到这一步走完
+            # 才可能被看到，实际上永远看不到（execute 结束就 succeed）。
+            deadline = time.time() + duration
+            while time.time() < deadline:
+                if goal_handle.is_cancel_requested:
+                    self._hold_current('exec')
+                    goal_handle.canceled()
+                    self.get_logger().warn('Trajectory canceled by client')
+                    return FollowJointTrajectory.Result()
+                time.sleep(0.01)
+
+        # 最后一个点之后也要查：取消可能在最后一段等待期间到达
+        if goal_handle.is_cancel_requested:
+            self._hold_current('end')
+            goal_handle.canceled()
+            self.get_logger().warn('Trajectory canceled at end')
+            return FollowJointTrajectory.Result()
+
         # 完成后返回成功 / succeed goal
         goal_handle.succeed()
         return FollowJointTrajectory.Result()
