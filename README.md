@@ -98,6 +98,8 @@ DEFAULT_ACC_TIME / DEC_TIME = 50 ms    ← 脑控场景应显式放长
 | 绝对定位误差 10~11 mm | 加**二次定位补偿**（目标 = 2×原目标 − 实测），落点压到 2.5 mm |
 | 执行异常绕过回位 | `sequence.run` 包 try/except，代码崩了也走"停 + 回位" |
 | `cello_controller` 不响应取消请求 | **已实现，未真机验证**：cancel 回调立即下发"保持当前角度"（time=100 ms），execute 每次等待改成 10 ms 分片并检查 `is_cancel_requested`。仍不是急停——断电才是 |
+| URDF 限速与 yaml 不一致 | URDF 的 6 个臂关节 `velocity="1"`(57°/s) 与 `joint_limits.yaml` 的 `max_velocity: 3.14` 冲突。yaml 实际覆盖了 URDF，所以那个 `1` 从未生效、只误导人。已统一为 3.14 |
+| `task --phase place` 不检查手上有没有东西 | 已加前置检查：开口 ≤9.5 mm（合到底）或 ≥64 mm（全开）都判"没东西"，拒绝执行；`--no-grasp-check` 可跳过 |
 | joint6 限速 13.14→3.14 / 加速度限值打开 | 见 `star-arm-moveit2` 的 commit |
 | `sensors_3d` 非空导致 move_group 静默死 | 置为 `[]`；IK 超时 0.005→0.05 s；零位偏移补偿 |
 
@@ -106,9 +108,7 @@ DEFAULT_ACC_TIME / DEC_TIME = 50 ms    ← 脑控场景应显式放长
 | 问题 | 后果 |
 |---|---|
 | `robo_driver` 上电无条件 `reset_multi_turn_angle` + 驱到零位 | 启动瞬间断电 50 ms，臂会掉一点 |
-| URDF `velocity="1"`(57°/s) 与 yaml `3.14`(180°/s) 不一致 | 限速依据有两份 |
 | 舵机型号表缺 `ra8-u26`，LeRobot 全声明为 `rx8-u50` | 若用型号握手校验，真机可能报错 |
-| `task --phase place` 不检查手上有没有东西 | 空按会空放（有意为之：硬判会误伤夹薄片） |
 
 ## 目录
 

@@ -193,6 +193,31 @@ def set_grip_frac(frac: float, action: str = "grip_open") -> link.Result:
     return _run(action, lambda: link.grip_deg(deg, action=action))
 
 
+def check_holding(min_gap_mm: float = GAP_MIN_MM + 1.5):
+    """检查夹爪是否夹着东西。`--phase place` 之前用。
+
+    返回 (True=有东西 / False=空的 / None=读不到, 说明)。
+
+    ⚠ 判据是"开口大于最小开口"。夹爪最小开口就是 8 mm（两指间的结构间隙），
+    比它更薄的物体本来也夹不住 —— 这种情况判据无从分辨，用 --no-grasp-check 跳过。
+    """
+    pos = link.gripper_state()
+    if pos is None:
+        return None, "读不到 joint7_left（robo_driver 没起？）"
+    gap = gripper_gap_mm(pos)
+    if gap is None:
+        return None, "读不到 joint7_left"
+    if gap <= min_gap_mm:
+        return False, "开口 %.1f mm（≈最小开口 %.0f mm），判定手上没东西" % (
+            gap, GAP_MIN_MM)
+    # 全开也是一种"没夹东西"：上一轮 pick 失败会停在张开状态。
+    # 阈值取 GAP_MAX-1，这样夹 60 mm 的物体（gap=60）仍判"有东西"。
+    if gap >= GAP_MAX_MM - 1.0:
+        return False, "开口 %.1f mm（≈全开 %.0f mm），判定手上没东西" % (
+            gap, GAP_MAX_MM)
+    return True, "开口 %.1f mm，判定夹着东西" % gap
+
+
 def check_grasp(object_width: float, tol_mm: float = 3.0):
     """合爪后判断是否真的夹住了东西。
 

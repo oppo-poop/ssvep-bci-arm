@@ -76,6 +76,8 @@ def main(argv=None):
     ap.add_argument("--no-verify-grasp", action="store_true",
                     help="强制关闭抓取校验")
     ap.add_argument("--name", help="场景名，仅用于输出")
+    ap.add_argument("--no-grasp-check", action="store_true",
+                    help="place 阶段跳过'手上有没有东西'的检查")
     ap.add_argument("--phase", choices=["all", "pick", "place"], default="all",
                     help="all=完整取放（默认）；pick=只取物并停在抬起位；"
                          "place=从当前位姿放置并回位")
@@ -103,6 +105,20 @@ def main(argv=None):
         for p in problems:
             print("  · " + p, file=sys.stderr)
         return 2
+
+    # place 之前确认手上确实有东西：空放会白跑一趟，还可能把夹爪怼到台面上。
+    # dry-run 不连硬件，跳过。
+    if args.phase == "place" and not args.no_grasp_check and not args.dry_run:
+        holding, note = primitives.check_holding()
+        if holding is False:
+            print("✗ 夹持检查未通过：%s" % note, file=sys.stderr)
+            print("  手上确实有东西却报这个（比如夹的是薄片），"
+                  "加 --no-grasp-check 跳过。", file=sys.stderr)
+            return 2
+        if holding is None:
+            print("⚠ 夹持检查读不到状态：%s —— 仍继续执行" % note)
+        else:
+            print("  夹持检查：%s" % note)
 
     if args.phase == "pick":
         steps = sequence.build_pick(scene)
