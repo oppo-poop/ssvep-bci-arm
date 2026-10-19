@@ -12,7 +12,7 @@
 | 真机 MoveIt 单点 | ✅ | 误差 4.92 mm，9.9 s |
 | 关节行程实测 | ✅ | 6 轴全测；URDF 限位全线不宽于实测，不用改 |
 | 真机完整取放 | ✅ | **连续 13 次全通过**（2026-10-19）；节拍 30~70 s，中位 64.7 s。30 s 档=未触发补偿（落点 4.8 mm），70 s 档=补偿一次（2.5 mm） |
-| 意图层（SSVEP→动作） | 🟡 | `realtime.py --target arm` → `sinks/arm_sink.py` → `task --phase pick/place`；5 块映射（回位/取物/放置/预留/停止）；**待真机联调** |
+| 意图层（SSVEP→动作） | ✅ | **脑控已驱动机械臂完成示教动作**（2026-10-19 19:19 首次）；`realtime.py --target arm` → `sinks/arm_sink.py` → `task --phase pick/place`。延迟与成功率**未系统测量**，action 层有 `unknown result response` 告警待修 |
 | 视觉检测 / 检测框即刺激 | ❌ | 未开始 |
 
 ## 文档导航
