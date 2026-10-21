@@ -70,7 +70,7 @@ DEFAULT_ACC_TIME / DEC_TIME = 50 ms    ← 脑控场景应显式放长
 2. **无 X 环境跑 `move_group` 必崩**。`sensors_3d.yaml` 的 `sensors` 必须为 `[]`，
    否则 octomap 的 `mesh_filter` 要开 GLUT 窗口，进程以 exit −11 静默死掉。
 3. **编译 C++ 要给 TMPDIR**。本机 `/tmp` 是 10 MB tmpfs，"设备上没有空间"不是磁盘满：
-   `TMPDIR=/home/ljl/cctmp colcon build ...`
+   `mkdir -p $HOME/cctmp && TMPDIR=$HOME/cctmp colcon build ...`
 4. **`robo_driver` 改了必须重建**。`--symlink-install` 对它生成的是 egg-link 指向 `build/`，
    那里是拷贝不是符号链接。
 
@@ -142,7 +142,9 @@ ssvep-Roarm/
 cd star-arm-moveit2
 colcon build
 cd ..
-# ⚠ 本机 /tmp 只有 10 MB，要指定 TMPDIR=/home/ljl/cctmp，否则报"设备上没有空间"
+# ⚠ 若 /tmp 太小（本机只有 10 MB），换个大点的临时目录。
+#   注意 $HOME 本身也不能含中文，rosidl 会在中文字符处截断路径。
+#   mkdir -p $HOME/cctmp && TMPDIR=$HOME/cctmp colcon build
 
 # 仿真
 bash scripts/sim_up.sh

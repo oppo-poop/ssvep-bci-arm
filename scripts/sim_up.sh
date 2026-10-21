@@ -20,8 +20,8 @@
 
 set -uo pipefail
 
-WS="${WS:-/home/ljl/BCI/DeepBCI-8ch/ssvep-Roarm/star-arm-moveit2}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WS="${WS:-$SCRIPT_DIR/../star-arm-moveit2}"
 PIDFILE="$WS/.sim.pids"
 DEMOLOG="$WS/.sim_demo.log"
 NODELOG="$WS/.sim_node.log"

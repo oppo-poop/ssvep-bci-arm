@@ -23,9 +23,12 @@ import subprocess
 import sys
 import time
 
-WS = "/home/ljl/BCI/DeepBCI-8ch/ssvep-Roarm/star-arm-moveit2"
-SCRIPTS = "/home/ljl/BCI/DeepBCI-8ch/ssvep-Roarm/scripts"
-CLI = os.path.join(SCRIPTS, "roarm_cli.py")
+from pathlib import Path
+
+# 按本文件位置推断，团队里换机器/换目录都不用改
+SCRIPTS = Path(__file__).resolve().parent
+WS = SCRIPTS.parent / "star-arm-moveit2"
+CLI = SCRIPTS / "roarm_cli.py"
 
 TOL = "5"          # 毫米
 WAIT = "15"        # 可达目标的等待上限

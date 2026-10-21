@@ -21,8 +21,10 @@
 
 set -euo pipefail
 
-REPO="${REPO:-/home/ljl/BCI/DeepBCI-8ch/ssvep-bci}"
-BACKUP_DIR="${BACKUP_DIR:-/home/ljl/git-backups}"
+# 本脚本在 ssvep-Roarm/scripts/ 下，ssvep-bci 与它同级
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="${REPO:-$HERE/../../ssvep-bci}"
+BACKUP_DIR="${BACKUP_DIR:-$HOME/git-backups}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
 MODE="dry-run"

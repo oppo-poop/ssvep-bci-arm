@@ -14,7 +14,9 @@
 
 set -o pipefail
 
-WS="${WS:-/home/ljl/BCI/DeepBCI-8ch/ssvep-Roarm/star-arm-moveit2}"
+# 工作区位置按脚本自身位置推断，团队里换机器/换用户名都不用改
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WS="${WS:-$HERE/../star-arm-moveit2}"
 PIDFILE="$WS/.robot.pids"
 DRVLOG="$WS/.robot_driver.log"
 DEMOLOG="$WS/.robot_demo.log"
