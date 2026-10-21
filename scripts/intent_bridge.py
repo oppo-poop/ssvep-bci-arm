@@ -29,6 +29,7 @@
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -47,8 +48,11 @@ INTENT_MAP = {
     4: ("stop",  None),                    # 停止块：不动作
 }
 
-#: ssvep-bci 的实时状态文件（它每帧写，含解码结果）
-DEFAULT_STATUS = SCRIPTS.parent.parent / "ssvep-bci" / "run_status.json"
+#: ssvep-bci 的实时状态文件（它每帧写，含解码结果）。
+#: 默认假设两个仓库在同一父目录下；分开 clone 时用 SSVEP_STATUS 指定。
+DEFAULT_STATUS = Path(os.environ.get(
+    "SSVEP_STATUS",
+    SCRIPTS.parent.parent / "ssvep-bci" / "run_status.json")).expanduser()
 
 WAIT_S = 25           # 单条动作等待上限
 COOLDOWN_S = 1.0      # 两次动作之间的最小间隔
