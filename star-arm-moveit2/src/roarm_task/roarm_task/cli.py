@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, sequence
+from . import config, primitives, sequence
 from .scene import Scene
 
 
