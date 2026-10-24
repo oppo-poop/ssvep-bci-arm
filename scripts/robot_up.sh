@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 真机一键启动：driver + move_group/rviz + 执行节点
 #
-#   bash scripts/robot_up.sh            # 启动（会先确认）
+#   bash scripts/robot_up.sh            # 启动（会先确认，默认无 RViz）
+#   VELOCITY=0.15 ACCELERATION=0.30 bash scripts/robot_up.sh   # 约 3 倍速
+#   RVIZ=true bash scripts/robot_up.sh  # 带 RViz（需要可用的 X/GLX）
 #   bash scripts/robot_up.sh --status   # 看各节点状态
 #   bash scripts/robot_up.sh --stop     # 全部停掉
 #
@@ -14,9 +16,9 @@
 
 set -o pipefail
 
-# 工作区位置按脚本自身位置推断，团队里换机器/换用户名都不用改
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WS="${WS:-$HERE/../star-arm-moveit2}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 默认用本仓库自带的 star-arm-moveit2；换机器/换工作区时用 WS=... 覆盖
+WS="${WS:-$(realpath -m "$SCRIPT_DIR/../star-arm-moveit2")}"
 PIDFILE="$WS/.robot.pids"
 DRVLOG="$WS/.robot_driver.log"
 DEMOLOG="$WS/.robot_demo.log"
@@ -28,10 +30,39 @@ ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
 warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*"; }
 err()  { printf '%s✗%s %s\n' "$RED" "$RST" "$*" >&2; }
 
+# ROS 节点用系统 python；conda 的 python3 没有 rclpy（可用 PYTHON=... 覆盖）
+PY="${PYTHON:-/usr/bin/python3}"
+
+# ROS 发行版自动识别：优先当前 shell 的 $ROS_DISTRO，其次找一个装了的
+# （覆盖：ROS_SETUP=/path/to/setup.bash）
+find_ros_setup() {
+  if [ -n "${ROS_SETUP:-}" ]; then printf '%s\n' "$ROS_SETUP"; return 0; fi
+  local d
+  if [ -n "${ROS_DISTRO:-}" ] && [ -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]; then
+    printf '%s\n' "/opt/ros/${ROS_DISTRO}/setup.bash"; return 0
+  fi
+  for d in humble jazzy iron rolling; do
+    if [ -f "/opt/ros/${d}/setup.bash" ]; then
+      printf '%s\n' "/opt/ros/${d}/setup.bash"; return 0
+    fi
+  done
+  return 1
+}
+
 source_ros() {
+  local setup
+  if ! setup=$(find_ros_setup); then
+    err "找不到 ROS 2：/opt/ros/*/setup.bash 都不存在"
+    return 1
+  fi
+  if [ ! -f "$WS/install/setup.bash" ]; then
+    err "工作区还没构建：$WS/install/setup.bash 不存在"
+    msg "  先构建：cd \"$WS\" && colcon build --symlink-install"
+    return 1
+  fi
   set +u
-  # shellcheck disable=SC1091
-  source /opt/ros/humble/setup.bash
+  # shellcheck disable=SC1090
+  source "$setup"
   # shellcheck disable=SC1091
   source "$WS/install/setup.bash"
   set +u
@@ -109,7 +140,15 @@ start_all() {
   read -r ans
   case "$ans" in [yY]|[yY][eE][sS]) ;; *) msg "已取消"; exit 1 ;; esac
 
-  source_ros
+  source_ros || exit 1
+
+  if [ ! -e /dev/ttyUSB0 ]; then
+    warn "/dev/ttyUSB0 不存在 —— driver 会因串口初始化失败而退出"
+  elif [ ! -r /dev/ttyUSB0 ] || [ ! -w /dev/ttyUSB0 ]; then
+    err "/dev/ttyUSB0 没有读写权限；把自己加进 dialout 组后重新登录："
+    msg "  sudo usermod -aG dialout $USER"
+  fi
+
   : > "$PIDFILE"
 
   # ---- 1) driver（robo_driver + cello_controller）
@@ -134,35 +173,52 @@ start_all() {
     stop_all; exit 1
   fi
 
-  # ---- 3) move_group + rviz + rsp
-  msg "启动 move_group / rviz…"
-  setsid ros2 launch cello_moveit_config actual_robot_demo.launch.py > "$DEMOLOG" 2>&1 &
+  # 光有 publisher 还不够：driver 可能刚初始化完就因为串口异常退出。
+  # 再确认节点还活着、并且真的有一帧数据。
+  if pgrep -f "robo_driver/lib/robo_driver/driver" >/dev/null 2>&1 \
+     && timeout 8 ros2 topic echo /joint_states --once >/dev/null 2>&1; then
+    ok "joint_states 有实际数据"
+  else
+    err "joint_states 没有实际数据，driver 可能已因串口异常退出"
+    msg "  看 $DRVLOG"
+    stop_all; exit 1
+  fi
+
+  # ---- 3) move_group + rsp（RViz 默认关闭：本机 GLX 不可用时 rviz2 会崩）
+  local rviz="${RVIZ:-false}"
+  msg "启动 move_group / rsp（use_rviz=$rviz）…"
+  setsid ros2 launch cello_moveit_config actual_robot_demo.launch.py \
+    use_rviz:="$rviz" > "$DEMOLOG" 2>&1 &
   local demo_pid=$!
   echo "$demo_pid" >> "$PIDFILE"
   wait_for_log "$DEMOLOG" "You can start planning" 45 "move_group" || { stop_all; exit 1; }
 
-  # ---- 4) 执行节点。默认 0.05（约 3 mm/s，安全但慢）；
-  #         示教/粗定位可以 VELOCITY=0.15 bash scripts/robot_up.sh（约 9 mm/s）
+  # ---- 4) 执行节点。默认 0.10 / 0.20（约 6 mm/s）；
+  #         要更稳用 VELOCITY=0.05 ACCELERATION=0.10（约 3 mm/s），
+  #         示教/粗定位用 VELOCITY=0.15 ACCELERATION=0.30（约 9 mm/s）
   local vel="${VELOCITY:-0.05}"
-  msg "启动执行节点（velocity_scaling=$vel）…"
+  local acc="${ACCELERATION:--1.0}"
+  msg "启动执行节点（velocity_scaling=$vel, acceleration_scaling=$acc）…"
   setsid ros2 launch cello_moveit_config arm_moveit_write.launch.py \
-    velocity_scaling:="$vel" > "$NODELOG" 2>&1 &
+    velocity_scaling:="$vel" acceleration_scaling:="$acc" > "$NODELOG" 2>&1 &
   local node_pid=$!
   echo "$node_pid" >> "$PIDFILE"
   wait_for_log "$NODELOG" "ArmMoveitControl ready" 20 "arm_moveit_write" || { stop_all; exit 1; }
 
   msg ""
+  msg "当前 shell 先加载工作区："
+  msg "  ${DIM}source $WS/install/setup.bash${RST}"
   ok "全部就绪。试："
-  msg "  ${DIM}python3 scripts/roarm_cli.py where${RST}"
-  msg "  ${DIM}python3 scripts/roarm_cli.py pose 0.45 0 0.40 --wait 30${RST}"
+  msg "  ${DIM}$PY $SCRIPT_DIR/roarm_cli.py where${RST}"
+  msg "  ${DIM}$PY $SCRIPT_DIR/roarm_cli.py pose 0.45 0 0.40 --wait 30${RST}"
   msg ""
   msg "日志：$DRVLOG / $DEMOLOG / $NODELOG"
   msg "停止：bash scripts/robot_up.sh --stop"
 }
 
 case "${1:-}" in
-  --status) status ;;
-  --stop)   source_ros 2>/dev/null; stop_all ;;
+  --status) source_ros >/dev/null 2>&1 || true; status ;;
+  --stop)   source_ros >/dev/null 2>&1 || true; stop_all ;;
   "")       start_all ;;
   *)        msg "用法：$0 [--status|--stop]"; exit 2 ;;
 esac
