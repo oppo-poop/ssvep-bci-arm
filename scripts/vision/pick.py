@@ -438,9 +438,16 @@ def main():
                    cv2.MARKER_CROSS, 40, 3)
     cv2.putText(view, "obj (%.0f,%.0f)" % uv, (int(uv[0]) + 18, int(uv[1]) - 8),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-    cv2.putText(view, "base %+.0f,%+.0f mm  ->  link6 %+.0f,%+.0f,%+.0f" %
-                (P_mm[0], P_mm[1], tgt[0], tgt[1], tgt[2]),
-                (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
+    # 物料坐标标全三个分量 —— 只标 x,y 时没法判断"是不是高度错了"
+    cv2.putText(view, "OBJ base  x=%+.1f  y=%+.1f  z=%+.1f mm" %
+                (P_mm[0], P_mm[1], P_mm[2]),
+                (10, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+    cv2.putText(view, "link6 target  x=%+.1f  y=%+.1f  z=%+.1f mm" %
+                (tgt[0], tgt[1], tgt[2]),
+                (10, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2)
+    cv2.putText(view, "pixel (%.0f, %.0f)   z_plane=%.1f mm" %
+                (uv[0], uv[1], z_g * 1000),
+                (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
     if args.image:
         os.makedirs(os.path.dirname(os.path.abspath(args.image)) or ".", exist_ok=True)
         saved = args.image
