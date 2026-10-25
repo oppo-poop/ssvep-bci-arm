@@ -23,3 +23,6 @@ __pycache__/
 
 # 取放连跑的逐次日志（26+ 个）；只保留 summary.csv 这一张汇总表
 data/runs/*.log
+
+# 标定文件的临时备份（fix_extrinsics 生成）
+*.bak
