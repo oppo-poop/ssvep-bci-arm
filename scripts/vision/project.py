@@ -44,6 +44,18 @@ def pixel_to_base(u, v, K, dist, T_base_cam, z_plane):
     K = np.asarray(K, dtype=np.float64)
     T = np.asarray(T_base_cam, dtype=np.float64)
 
+    # 防呆：K 和 T_base_cam 传反时，cv2 只会报一句
+    # "CV_IS_MAT(_cameraMatrix) && rows == 3" —— 完全看不出是参数顺序问题。
+    # 这里直接点名。移植队友代码时踩过一次（他们的签名是 u,v,T,K,dist,z）。
+    if K.shape == (4, 4) or T.shape == (3, 3):
+        raise ValueError(
+            "参数顺序疑似传反：本函数签名是 "
+            "pixel_to_base(u, v, K, dist, T_base_cam, z_plane)，"
+            "其中 K 为 3x3、T_base_cam 为 4x4。"
+            "收到 K%s / T%s" % (K.shape, T.shape))
+    if T.shape != (4, 4):
+        raise ValueError("T_base_cam 必须是 4x4，收到 %s" % (T.shape,))
+
     if dist is None:
         # 不去畸变：直接归一化
         x = (u - K[0, 2]) / K[0, 0]

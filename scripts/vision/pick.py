@@ -357,7 +357,7 @@ def main():
     if args.u is not None and args.v is not None:
         uv = (args.u, args.v)
         print("用指定像素 (%.0f, %.0f)" % uv)
-        P = pixel_to_base(uv[0], uv[1], T_base_cam, K, dist, z_g)
+        P = pixel_to_base(uv[0], uv[1], K, dist, T_base_cam, z_g)
         if P is None:
             print("❌ 该像素与 z=%.3f 平面没有交点（视线朝上？）" % z_g)
             return 1
@@ -370,7 +370,7 @@ def main():
             return 1
         print("画面里 %d 个蓝色区域：" % len(raw))
         for uv_i, a in raw:
-            P_i = pixel_to_base(uv_i[0], uv_i[1], T_base_cam, K, dist, z_g)
+            P_i = pixel_to_base(uv_i[0], uv_i[1], K, dist, T_base_cam, z_g)
             if P_i is None:
                 print("  (%4.0f,%4.0f) 面积%6.0f  视线与平面无交点"
                       % (uv_i[0], uv_i[1], a))
