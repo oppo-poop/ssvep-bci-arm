@@ -44,6 +44,18 @@ OFFSET_JSON = os.path.join(DATA, "grasp_offset.json")
 LOG_CSV = os.path.join(DATA, "pick_log.csv")
 SCENE_YAML = os.path.join(ROOT, "data", "scene_real.yaml")
 
+#: 诊断图输出目录。--image 只作为**输入**（离线测），输出统一走这里，
+#: 免得"没指定图片"时 imwrite(None, ...) 崩在最后一步。
+PREVIEW_DIR = os.path.join(DATA, "preview")
+
+
+def save_preview(img, name="pick_view.png"):
+    os.makedirs(PREVIEW_DIR, exist_ok=True)
+    path = os.path.join(PREVIEW_DIR, name)
+    if not cv2.imwrite(path, img):
+        print("⚠ 诊断图写入失败：%s" % path, file=sys.stderr)
+    return path
+
 #: 默认末端姿态（world -> link6，零位实测），与 roarm_cli.py 保持一致
 DEFAULT_QUAT = (0.5, -0.5, 0.5, -0.5)
 
@@ -311,7 +323,9 @@ def main():
     ap.add_argument("--allow-far", action="store_true",
                     help="允许 x/y 超出任务工作区（默认拒绝，防止臂去撞限位）")
     ap.add_argument("--image", default=None,
-                    help="叠加结果图保存路径")
+                    help="叠加结果图的保存路径（默认 data/vision/preview/pick_view.png）")
+    ap.add_argument("--from-file", default=None, metavar="PNG",
+                    help="不连相机，从已有图片读（离线调试用）")
     args = ap.parse_args()
 
     # ---- 1) 标定参数
@@ -347,12 +361,19 @@ def main():
             print("  ⚠ home 没进 25mm（臂有固定偏差属正常），继续下一步")
 
     # ---- 3) 拍照 + 检测
-    print("拍照…")
-    try:
-        img = grab_frame()
-    except SystemExit as e:
-        print("❌ %s" % e)
-        return 1
+    if args.from_file:
+        print("读图…", args.from_file)
+        img = cv2.imread(args.from_file)
+        if img is None:
+            print("❌ 读不到 %s（路径不对，或不是图片）" % args.from_file)
+            return 1
+    else:
+        print("拍照…")
+        try:
+            img = grab_frame()
+        except SystemExit as e:
+            print("❌ %s" % e)
+            return 1
     cands = []          # [(uv, area, P_base)]
     if args.u is not None and args.v is not None:
         uv = (args.u, args.v)
@@ -366,7 +387,7 @@ def main():
         raw, _mask = blue_candidates(img)
         if not raw:
             print("❌ 画面里没有蓝色区域（可用 --u --v 指定像素，或调颜色阈值）")
-            cv2.imwrite(args.image, img)
+            save_preview(img, "pick_no_blue.png")
             return 1
         print("画面里 %d 个蓝色区域：" % len(raw))
         for uv_i, a in raw:
@@ -386,7 +407,7 @@ def main():
             print("❌ 蓝色区域都不在合理距离内（%.2f~%.2f m），大概率认错东西了"
                   % (R_MIN, R_MAX))
             print("   物料放台面上、离底座 0.1~0.75 m；也可用 --u --v 手动指定像素")
-            cv2.imwrite(args.image, img)
+            save_preview(img, "pick_no_candidate.png")
             return 1
         uv, area, P = cands[0]
         P_mm = P * 1000.0
@@ -420,8 +441,13 @@ def main():
     cv2.putText(view, "base %+.0f,%+.0f mm  ->  link6 %+.0f,%+.0f,%+.0f" %
                 (P_mm[0], P_mm[1], tgt[0], tgt[1], tgt[2]),
                 (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
-    cv2.imwrite(args.image, view)
-    print("叠加图已存 %s" % args.image)
+    if args.image:
+        os.makedirs(os.path.dirname(os.path.abspath(args.image)) or ".", exist_ok=True)
+        saved = args.image
+        cv2.imwrite(saved, view)
+    else:
+        saved = save_preview(view, "pick_view.png")
+    print("叠加图已存 %s" % saved)
 
     if args.dry_run:
         print("\n--dry-run：不动机械臂。确认上面的点没问题就去掉这个参数。")
