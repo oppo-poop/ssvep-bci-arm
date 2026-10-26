@@ -17,7 +17,8 @@
     这也正好是评判标定质量最直接的指标（不需要额外真值）。
 
 用法
-    # 1) 采集：臂换一个姿态 → 回车 → 拍一张 + 读 where
+    # 1) 自动采集：按位姿表逐个移动 → 拍图 + 读 where
+    #    （机械臂上电后舵机锁定，推不动，必须让它自己走）
     python3 scripts/vision/handeye.py --capture
 
     # 2) 看已采了多少、每个样本的码检测误差
@@ -118,36 +119,79 @@ def save_samples(items):
 
 
 # ---------------------------------------------------------------- 采集
+def load_poses(path):
+    """读位姿表：序号 x y z qx qy qz qw [j1..j6]。返回 [(x,y,z,qx,qy,qz,qw), ...]。"""
+    poses = []
+    for line in open(path, encoding="utf-8"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 8:
+            continue
+        vals = [float(v) for v in parts[1:8]]
+        poses.append(tuple(vals))
+    return poses
+
+
+def _cli(*args, timeout=60):
+    """调 roarm_cli，返回 (rc, 输出)。"""
+    if not os.path.isfile(WS_SETUP):
+        raise SystemExit("工作区没构建：%s" % WS_SETUP)
+    inner = ("set +u; source /opt/ros/${ROS_DISTRO:-humble}/setup.bash; "
+             "source %s; exec /usr/bin/python3 %s %s"
+             % (WS_SETUP, CLI, " ".join(str(a) for a in args)))
+    p = subprocess.run(["bash", "-c", inner], capture_output=True,
+                       text=True, timeout=timeout)
+    return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+
 def cmd_capture(args):
-    import cv2
+    """自动采集：按位姿表逐个移动 → 拍图 → 记录。
+
+    **机械臂上电后舵机是锁定的，推不动** —— 所以必须靠 roarm_cli pose 让它自己走。
+    （这一点之前设计错了，写成"手动摆位 + 回车"，真机上根本做不到。）
+    """
     import camera
     import aruco as A
     from calib import load_intrinsics
 
+    if not os.path.isfile(args.poses):
+        print("❌ 位姿表不存在：%s" % args.poses)
+        print("   队友的位姿表在 brain_extract/vision/data/handeye_poses.txt，可直接复制过来")
+        return 1
+
+    poses = load_poses(args.poses)
+    if len(poses) < 4:
+        print("❌ 位姿表只有 %d 个位姿，至少要 4 个（建议 12+）" % len(poses))
+        return 1
+
     K, dist, _ = load_intrinsics(INTRINSICS, expect_size=(1280, 720))
     items = load_samples()
+    print("已有样本 %d 个；位姿表 %s 共 %d 个" % (len(items), os.path.basename(args.poses), len(poses)))
+    print("开始自动采集（每个位姿约 %.0f 秒）…" % (args.wait + 2))
 
-    print("已有样本：%d 个" % len(items))
-    print("摆一个姿态（码要在画面里），按回车采集；输入 q 退出")
-    print("提示：姿态要**差异大** —— 俯仰、偏航都变，别只在同一高度平移")
-    print()
-
-    while True:
-        cmd = input("[%d] 回车采集 / q 退出 > " % (len(items) + 1)).strip().lower()
-        if cmd == "q":
-            break
+    for i, (x, y, z, qx, qy, qz, qw) in enumerate(poses, 1):
+        print("\n[%d/%d] 移到 (%.3f, %.3f, %.3f)…" % (i, len(poses), x, y, z))
+        rc, out = _cli("pose", "%.6f" % x, "%.6f" % y, "%.6f" % z,
+                       "%.6f" % qx, "%.6f" % qy, "%.6f" % qz, "%.6f" % qw,
+                       "--wait", "%.1f" % args.wait, "--tol", "%.1f" % args.tol,
+                       timeout=args.wait + 40)
+        if rc != 0:
+            tail = [ln for ln in out.strip().splitlines() if ln.strip()][-2:]
+            print("  ✗ 没到位（rc=%d）：%s" % (rc, " | ".join(tail)))
+            continue
 
         T_g2b = read_link6()
         if T_g2b is None:
+            print("  ✗ 读不到 link6 位姿，跳过")
             continue
 
         img = camera.grab_frame()
         T_cam, err = A.pose_from_marker(img, K, dist, args.marker_size, args.marker_id)
         if T_cam is None:
-            print("  ✗ 画面里没看到 ID %d 的码（换个姿态，或确认码朝相机）" % args.marker_id)
+            print("  ✗ 画面里没看到 ID %d 的码，跳过" % args.marker_id)
             continue
-        if err > 3.0:
-            print("  ⚠ 重投影 %.1f px 偏大，码可能模糊/反光；仍然记录，但 --solve 时留意" % err)
 
         items.append({"T_cam": T_cam, "T_g2b": T_g2b, "err_px": err})
         save_samples(items)
@@ -157,10 +201,11 @@ def cmd_capture(args):
     print("\n共 %d 个样本。" % len(items))
     if len(items) < 6:
         print("⚠ 少于 6 个解不稳，建议 12~20 个")
+    elif len(items) < 12:
+        print("提示：%d 个偏少，12+ 更稳" % len(items))
     return 0
 
 
-# ---------------------------------------------------------------- 查看
 def cmd_list(args):
     items = load_samples()
     if not items:
@@ -362,7 +407,7 @@ def cmd_solve(args):
 def main():
     ap = argparse.ArgumentParser(description="手眼标定（eye-to-hand）")
     g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument("--capture", action="store_true", help="采集一个姿态")
+    g.add_argument("--capture", action="store_true", help="按位姿表自动采集（臂自己走）")
     g.add_argument("--list", action="store_true", help="看已采样本")
     g.add_argument("--solve", action="store_true", help="求解外参")
     g.add_argument("--reset", action="store_true", help="清空样本")
@@ -370,6 +415,10 @@ def main():
     ap.add_argument("--marker-size", type=float, default=MARKER_SIZE_MM,
                     help="码的边长（毫米），默认 %.0f" % MARKER_SIZE_MM)
     ap.add_argument("--marker-id", type=int, default=MARKER_ID)
+    ap.add_argument("--poses", default=os.path.join(DATA, "handeye_poses.txt"),
+                    help="位姿表路径（默认 data/vision/handeye_poses.txt）")
+    ap.add_argument("--wait", type=float, default=25.0, help="每个位姿的等待秒数")
+    ap.add_argument("--tol", type=float, default=10.0, help="到位容差（毫米）")
     args = ap.parse_args()
 
     if args.reset:
