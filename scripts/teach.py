@@ -186,7 +186,7 @@ def move_abs(pos, quat, tgt):
     return tuple(tgt) if _send(quat, tgt, pos) else None
 
 
-def emit(pts, standoff_override=None):
+def emit(pts, standoff_override=None, out=None):
     """从示教点生成场景 yaml。"""
     missing = [k for k in ("pick", "place") if k not in pts]
     if missing:
@@ -241,11 +241,14 @@ def emit(pts, standoff_override=None):
         "clearance: 0.02",
         "verify_grasp: false",
     ]
-    SCENE_OUT.parent.mkdir(parents=True, exist_ok=True)
-    SCENE_OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print("\n  已写入 %s" % SCENE_OUT)
+    target = Path(out) if out else SCENE_OUT
+    if not target.is_absolute():
+        target = ROOT / target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print("\n  已写入 %s" % target)
     print("\n" + "\n".join("  " + l for l in lines if not l.startswith("#")))
-    print("\n  跑：ros2 run roarm_task task --scene %s --dry-run" % SCENE_OUT)
+    print("\n  跑：ros2 run roarm_task task --scene %s --dry-run" % target)
     print("      （先 --dry-run 看序列，确认后再去掉）")
     return True
 
@@ -281,6 +284,9 @@ def main():
     ap.add_argument("--clear", action="store_true", help="清空已记录的点")
     ap.add_argument("--standoff", type=float,
                     help="接近偏移（米），覆盖从 approach 推算的值")
+    ap.add_argument("--out", default=None,
+                    help="生成的场景 yaml 路径（默认 data/scene_real.yaml；"
+                         "相对路径以项目根为基准）")
     ap.add_argument("--force", action="store_true",
                     help="越过 roarm_cli 的软件工作区边界（BOUNDS 是推荐区，不是机械极限）")
     args = ap.parse_args()
@@ -298,7 +304,7 @@ def main():
                 print("  %-10s x=%.4f y=%+.4f z=%.4f" % (k, v["x"], v["y"], v["z"]))
         return 0
     if args.emit:
-        return 0 if emit(load_points(), args.standoff) else 1
+        return 0 if emit(load_points(), args.standoff, args.out) else 1
 
     if not os.environ.get("ROS_DISTRO"):
         print("⚠ 没检测到 ROS 环境。先 source /opt/ros/humble/setup.bash 和 install/setup.bash")
@@ -351,7 +357,7 @@ def main():
                     print("  %-10s x=%.4f y=%+.4f z=%.4f" % (k, v["x"], v["y"], v["z"]))
             continue
         if low == "emit":
-            emit(pts, args.standoff)
+            emit(pts, args.standoff, args.out)
             continue
         if low.startswith("mark"):
             parts = line.split()
