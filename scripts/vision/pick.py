@@ -209,15 +209,30 @@ def out_of_bounds(xyz):
     return bad
 
 
-def blue_candidates(img, min_area=500.0):
-    """画面里所有蓝色块，返回 [(uv, area), ...]（面积从大到小）。
+#: 颜色 HSV 范围（OpenCV 的 H 是 0~179，不是 0~360）。红跨 0 度，要两段拼。
+COLOR_RANGES = {
+    "red":    [((0, 120, 60), (10, 255, 255)),
+               ((170, 120, 60), (179, 255, 255))],
+    "green":  [((40, 80, 50), (85, 255, 255))],
+    "blue":   [((100, 120, 60), (130, 255, 255))],
+    "yellow": [((20, 120, 60), (35, 255, 255))],
+}
+
+
+def color_candidates(img, color="blue", min_area=500.0):
+    """画面里指定颜色的所有块，返回 [(uv, area), ...]（面积从大到小）。
 
     为什么不用 grasp_xy.detect_blue：它只返回"最大的那块"，
-    背景里一块蓝色托盘就能把真正的小物料挤掉（2026-10-21 踩到）。
+    背景里一块同色托盘就能把真正的小物料挤掉（2026-10-21 踩到）。
     这里把所有候选都交出来，交给物理距离再筛。
     """
+    if color not in COLOR_RANGES:
+        raise ValueError("未知颜色 %r，支持 %s" % (color, list(COLOR_RANGES)))
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, np.array([100, 120, 60]), np.array([130, 255, 255]))
+    mask = None
+    for lo, hi in COLOR_RANGES[color]:
+        m = cv2.inRange(hsv, np.array(lo), np.array(hi))
+        mask = m if mask is None else cv2.bitwise_or(mask, m)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -232,6 +247,11 @@ def blue_candidates(img, min_area=500.0):
         out.append(((m["m10"] / m["m00"], m["m01"] / m["m00"]), a))
     out.sort(key=lambda t: -t[1])
     return out, mask
+
+
+def blue_candidates(img, min_area=500.0):
+    """兼容旧调用（calib_xy 用它找蓝色探针）——内部走 color_candidates。"""
+    return color_candidates(img, "blue", min_area)
 
 
 # ---------------------------------------------------------------- 中断处理
@@ -900,6 +920,10 @@ def main():
     global Z_CMD_OFFSET_M        # 必须先声明：下面 argparse 的默认值要读它
     ap = argparse.ArgumentParser(description="视觉引导抓取（一条命令）")
     ap.add_argument("--dry-run", action="store_true", help="只算目标点并出图，不动机械臂")
+    ap.add_argument("--from-file", default=None, metavar="PNG",
+                    help="不连相机，从已有图片读（离线调检测/反投影）")
+    ap.add_argument("--color", default="blue", choices=("red", "green", "blue", "yellow"),
+                    help="找哪种颜色的物料（HSV 阈值见 COLOR_RANGES）")
     ap.add_argument("--u", type=float, default=None, help="手动指定像素 u")
     ap.add_argument("--v", type=float, default=None, help="手动指定像素 v")
     ap.add_argument("--z-grasp", type=float, default=None, help="抓取平面高度（米）")
@@ -1030,9 +1054,12 @@ def main():
     # --place-only 用不到相机（物料就在爪里，投放点由像素参数给定）。
     # 更关键的是：这时候相机正被 cap/vision_arm_color.py 拿着，
     # 硬开只会抢失败。所以这一支不走 LiveCam，把它置 None。
-    if args.place_only:
+    if args.place_only or args.from_file:
         cam, lv, PEEK = None, None, None
-        print("--place-only：不开相机窗口（投放点由 --drop-u/--drop-v 指定）")
+        if args.place_only:
+            print("--place-only：不开相机窗口（投放点由 --drop-u/--drop-v 指定）")
+        else:
+            print("--from-file：不连相机，读 %s" % args.from_file)
     else:
         try:
             cam = LiveCam()
@@ -1046,14 +1073,15 @@ def main():
         if lv.on:
             lv.set_status("[0/7] idle")
             print("实时画面已开启（窗口 vision_pick，动作期间也持续刷新）")
-    click_mode = args.click and args.u is None
+    # 离线读图时没有窗口，不能点选：直接走自动检测（或 --u/--v）
+    click_mode = args.click and args.u is None and not args.from_file
 
     # ---- 1) 标定参数
     d = np.load(os.path.join(DATA, "T_base_cam.npz"))
     T_base_cam = d["T_base_cam"]
     Kd = np.load(os.path.join(DATA, "cam_intrinsics.npz"))
     K, dist = Kd["K"], Kd["dist"]
-    z_g = (args.z_grasp if args.z_grasp is not None else load_scene_z()) + args.dz
+    z_g = (args.z_grasp if args.z_grasp is not None else load_scene_z(SCENE_YAML)) + args.dz
     # 点选投放时点的是**桌面**，不是物料中心。z_g 是"物料被点选/被夹"的那个
     # 高度 ≈ 物料中心 = 桌面 + 物料高/2，直接拿 z_g 去和桌面求交，整块投放区
     # 会朝相机方向缩 30~40mm（2026-10-25 "放置偏得严重"的主因之一）。
@@ -1331,14 +1359,21 @@ def main():
             print("  ⚠ home 没进 25mm（臂有固定偏差属正常），继续下一步")
 
     # ---- 3) 拍照 + 检测
-    print("拍照…")
-    try:
-        img = lv.pump(fresh=True)        # 相机常开，这里取最新一帧并刷新显示
+    if args.from_file:
+        print("读图…", args.from_file)
+        img = cv2.imread(args.from_file)
         if img is None:
-            raise SystemExit("相机没有画面")
-    except SystemExit as e:
-        print("❌ %s" % e)
-        return 1
+            print("❌ 读不到 %s（路径不对，或不是图片）" % args.from_file)
+            return 1
+    else:
+        print("拍照…")
+        try:
+            img = lv.pump(fresh=True)    # 相机常开，这里取最新一帧并刷新显示
+            if img is None:
+                raise SystemExit("相机没有画面")
+        except SystemExit as e:
+            print("❌ %s" % e)
+            return 1
     cands = []          # [(uv, area, P_base)]
     # 注意：--click 现在是默认行为，但显式给了 --u/--v 时应该用像素，
     # 否则 "指定像素" 会被点选窗口抢走（click_mode 已含这个判断）。
@@ -1373,12 +1408,12 @@ def main():
             return 1
         P_mm = P * 1000.0
     else:
-        raw, _mask = blue_candidates(img)
+        raw, _mask = color_candidates(img, args.color)
         if not raw:
             print("❌ 画面里没有蓝色区域（可用 --u --v 指定像素，或调颜色阈值）")
             save_preview(img, "pick_no_blue.png")
             return 1
-        print("画面里 %d 个蓝色区域：" % len(raw))
+        print("画面里 %d 个%s色区域：" % (len(raw), args.color))
         for uv_i, a in raw:
             P_i = pixel_to_base(uv_i[0], uv_i[1], T_base_cam, K, dist, z_g)
             if P_i is None:
@@ -1393,8 +1428,8 @@ def main():
                   % (uv_i[0], uv_i[1], a, P_i[0] * 1000, P_i[1] * 1000, r * 1000,
                      "✓" if good else "✗ 不在 %.2f~%.2f m 内" % (R_MIN, R_MAX)))
         if not cands:
-            print("❌ 蓝色区域都不在合理距离内（%.2f~%.2f m），大概率认错东西了"
-                  % (R_MIN, R_MAX))
+            print("❌ %s 色区域都不在合理距离内（%.2f~%.2f m），大概率认错东西了"
+                  % (args.color, R_MIN, R_MAX))
             print("   物料放台面上、离底座 0.1~0.75 m；也可用 --u --v 手动指定像素")
             save_preview(img, "pick_no_candidate.png")
             return 1
