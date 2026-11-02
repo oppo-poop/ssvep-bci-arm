@@ -42,10 +42,9 @@ from project import pixel_to_base as _pixel_to_base_impl
 def pixel_to_base(u, v, T_base_cam, K, dist, z_plane):
     """兼容队友的调用顺序（T 在前）。
 
-    project.py 的签名是 (u, v, K, dist, T_base_cam, z_plane)，而本文件是从
-    队友那份改来的、所有调用都写成 T 在前。**刻意把差异隔离在这一个包装里** ——
-    之前直接照抄调用，4x4 的 T 被当 3x3 内参，cv2 只报
-    `CV_IS_MAT(_cameraMatrix) && rows == 3`，完全看不出是参数顺序问题。
+    project.py 的签名是 (u, v, K, dist, T_base_cam, z_plane)，本文件所有调用
+    都写成 T 在前。刻意把差异隔离在这一个包装里 —— 直接照抄调用时，4x4 的 T
+    会被当 3x3 内参，cv2 只报 CV_IS_MAT，完全看不出是参数顺序问题。
     """
     return _pixel_to_base_impl(u, v, K, dist, T_base_cam, z_plane)
 
@@ -62,7 +61,7 @@ LOG_CSV = os.path.join(DATA, "pick_log.csv")
 XY_JSON = os.path.join(DATA, "xy_correction.json")
 PROBE_CSV = os.path.join(DATA, "probe_points.csv")
 
-#: 诊断图输出目录。--image 只作为**可选的输出路径**，不指定就走这里，
+#: 诊断图输出目录。--image 只是**可选的输出路径**，不指定就走这里，
 #: 免得没给参数时 cv2.imwrite(None, ...) 崩在最后一步。
 PREVIEW_DIR = os.path.join(DATA, "preview")
 
@@ -86,6 +85,18 @@ DEFAULT_OFFSET_MM = (16.6, 23.6, 86.2)
 #: y 取 [-0.400, +0.350]：覆盖相机横向视野（物料 y 约 -430~+377），
 #: 且两端都实测可达 —— 目标是"看得见就能抓"，不再有软件侧的额外收缩。
 BOUNDS = {"x": (0.278, 0.670), "y": (-0.400, 0.350), "z": (0.074, 0.438)}
+
+#: 命令端 z 补偿（米）。
+#: 2026-10-26 19:14 实测（空载、悬停）：命令 0.114 / 0.200 / 0.300，落在
+#: 0.101 / 0.186 / 0.286 —— 低 13~14mm，先补了 +0.014。
+#: 20:47 带负载实际抓放后回看：预抓取意图 130 → 实际 145（高 15），
+#: 投放下落意图 91 → 实际 103（高 12）。也就是 +14 补过头了，**整体再降 15**。
+#: 所以现值 = 0.014 - 0.015 = -0.001。
+#: ⚠ 这个偏差**不是常数**：今天采集 26 个位姿，误差从 -1 到 -25 都有，
+#: 随姿态变。常数只能压住当前工作区，换姿态还会差几毫米。
+#: 用 --z-offset-mm 可改，--no-z-offset 归零。
+#: 注意：只补"发出去的 z"；z_grasp 参与射线-平面求交，不能拿它来补。
+Z_CMD_OFFSET_M = -0.001
 
 #: 物料到基座的水平距离合理范围（米）。背景里的蓝色物体算出来动辄几米，
 #: 用它挡掉；2026-10-21 实际踩到：背景蓝色托盘算出 10.8 米。
@@ -148,7 +159,8 @@ def load_xy_correction():
                 float(d.get("right_dy_mm", 0.0)),
                 float(d.get("right_full_at_mm", -60.0)),
                 float(d.get("place_dx_mm", 0.0)),
-                float(d.get("place_dy_mm", 0.0)))
+                float(d.get("place_dy_mm", 0.0)),
+                float(d.get("place_dz_mm", 0.0)))
     except Exception as e:
         print("⚠ xy_correction.json 读不出来(%s)，本次不做 XY 修正" % e)
         return None
@@ -226,10 +238,11 @@ def blue_candidates(img, min_area=500.0):
 _ABORT = {"flag": False}
 _ABORT_HINT = (
     "\n⚠ 已取消当前动作，舵机会保持当前角度 —— 机械臂不会立刻掉下来。\n"
-    "   先别去推它。要重启栈（或它已经在抖、已经瘫软）时：\n"
-    "   ① 用手托住机械臂\n"
-    "   ② cd ~/brain/ssvep-bci-arm-main/ssvep-bci-arm-main\n"
-    "      bash scripts/robot_recover.sh\n"
+    "   接着会自动【收爪 + 回 home】（2026-11-01 起），不用手动收拾。\n"
+    "   · 想让它立刻停住别动 → 在回 home 过程中再按一次 Ctrl+C\n"
+    "   · 如果臂已经在抖 / 瘫软 → 先托住它，再跑：\n"
+    "     cd ~/brain/ssvep-bci-arm-main/ssvep-bci-arm-main\n"
+    "     bash scripts/robot_recover.sh\n"
 )
 
 
@@ -330,10 +343,33 @@ def run_cli(args, timeout=45):
     return p.returncode, "".join(lines).strip()
 
 
+#: 是否把 roarm_cli 的逐行输出全打出来（`--verbose`）。
+#: 默认**过滤掉"关节角(度): ..."那类行** —— 一步一行、一行 6 个数，
+#: 一场三色流程下来能刷掉上百行，把真正要看的结果全淹了（2026-10-28 用户要求）。
+#: 排查姿态/奇异点问题时再加 --verbose。
+VERBOSE = False
+
+
+#: 精简输出（2026-11-01 用户要求"终端输出精简即可"）。
+#: 每步都刷「→ 目标 / ✅ 到位 误差 x.xx mm 用时 x.xs / 实际 …」太吵，
+#: 一屏看不到重点。QUIET 只保留：
+#:   · 步骤标题（[2/7] 之类，自己 print 的不受影响）
+#:   · 目标点 / 实际落点（判断走没走对，必须留）
+#:   · 警告与失败（⚠ ❌ ⛔）
+#: 成功时的「✅ 到位」和「用时」收掉。要全部输出就加 --verbose。
+QUIET = True
+
+
 def show(out):
     for line in out.splitlines():
-        if line.strip():
-            print("    " + line.strip())
+        s = line.strip()
+        if not s:
+            continue
+        if not VERBOSE and s.startswith("关节角"):
+            continue
+        if QUIET and s.startswith(("✅ 到位", "❌ 未到位")):
+            continue          # 成功/失败确认，步骤标题里已经说明了
+        print("    " + s)
 
 
 RE_ACTUAL = re.compile(r"实际\s*x=\s*([-\d.]+)\s*y=\s*([-\d.]+)\s*z=\s*([-\d.]+)")
@@ -374,9 +410,14 @@ def cli_pose(xyz_mm, wait, tol, force, allow_far=False, retries=2, settle=True):
     因为标定用的 act_x/y/z 来自它。
     """
     x, y, z = (v / 1000.0 for v in xyz_mm)
+    # 臂每次都停在比命令低 13~14mm 的地方（见 Z_CMD_OFFSET_M）。这里补在
+    # **发出去的值**上：act 读回来的是真机位置，跟调用方传进来的目标仍是同一
+    # 个尺度，所以调用方的误差比较、move_z_compensated 的判据都不受影响。
+    # 工作区 BOUNDS 是按"意图"标的，所以边界检查仍用未补偿的 z。
+    z_send = z + Z_CMD_OFFSET_M
     # 四元数必须写在 --wait/--tol 前面：roarm_cli 的位置参数是 nargs="*"，
     # 混合「位置参数 + 选项 + 位置参数」会被 argparse 判成 unrecognized。
-    args = ["pose", "%.5f" % x, "%.5f" % y, "%.5f" % z]
+    args = ["pose", "%.5f" % x, "%.5f" % y, "%.5f" % z_send]
     args += ["%g" % v for v in DEFAULT_QUAT]
     args += ["--wait", "%.1f" % wait, "--tol", "%.1f" % tol]
     bad = out_of_bounds((x, y, z))
@@ -427,6 +468,27 @@ def cli_pose(xyz_mm, wait, tol, force, allow_far=False, retries=2, settle=True):
     return last_rc, last_act
 
 
+def pull_in(point, radius_limit, min_scale=0.70):
+    """把一个目标点**往底座方向收**，让它的水平半径不超过 radius_limit。
+
+    为什么需要（2026-10-28 真机，用户原话"可以斜着抬过来就不会超出范围"）：
+        这台臂在伸展位形（半径 600mm 以上）**垂直抬不起来** —— 实测目标 z=130、
+        实际只到 100~104，连补发一次也顶不上去，因为关节已经到极限了。
+        但"斜着抬"（一边升一边往底座方向收）是可以的：半径一变小，
+        姿态就离开极限区，z 自然上得去。
+        所以抬起目标不能只改 z，要同时把 xy 收进来一点。
+    min_scale：最多收到原来的 70%，别收得太狠把物料拖到别的东西上面。
+    """
+    p = np.asarray(point, dtype=np.float64)
+    if radius_limit is None or float(radius_limit) <= 0:
+        return p.copy()          # 关掉这个功能（老行为）
+    r = float(np.hypot(p[0], p[1]))
+    if r <= radius_limit or r < 1e-6:
+        return p.copy()
+    k = max(float(min_scale), float(radius_limit) / r)
+    return np.array([p[0] * k, p[1] * k, p[2]])
+
+
 def lift_to(up_mm, args, tol=30.0):
     """抬起（垂直上移）。短 wait 先试，没起来再补一次。
 
@@ -445,9 +507,19 @@ def lift_to(up_mm, args, tol=30.0):
     if z is None or z < up_mm[2] - 25.0:
         print("  ⚠ 没抬到位（z=%s，目标 %.0f），补发一次"
               % ("?" if z is None else "%.0f" % z, up_mm[2]))
-        rc, act = cli_pose(up_mm, min(args.wait, 45.0), tol + 10.0,
-                           not args.no_force, args.allow_far,
-                           retries=0, settle=False)
+    rc, act = cli_pose(up_mm, min(args.wait, 45.0), tol + 10.0,
+                       not args.no_force, args.allow_far,
+                       retries=0, settle=False)
+    # 补发一次还是没起来 → **真的抬不动**，不要再假装成功。
+    # 2026-10-28 真机：红物料在 y=-310（抓住点距底座 608mm）时，
+    # 两次都只到 z=100~104（目标 130），物料底部其实已经压在桌面上，
+    # 再往上顶就是往桌子里推。这时继续往下走（去投放）会拖着一路刮。
+    z2 = None if act is None else act[2]
+    if z2 is not None and z2 < up_mm[2] - 20.0:
+        print("  ⛔ 抬起失败（z=%.0f，目标 %.0f，差 %.0fmm）—— 这个位形抬不动。"
+              % (z2, up_mm[2], up_mm[2] - z2))
+        print("     物料多半还压在桌面上，**不要再往下走**。"
+              "松爪后退回 home，然后把物料往近处挪 40~60mm 再试")
     return rc, act
 
 
@@ -549,6 +621,26 @@ def retreat_xy(p_mm, dist_mm, lo_r=300.0):
         return None
     k = (r - dist) / r
     return np.array([x * k, y * k, z])
+
+
+def drop_slot_from_pixel(u, v, T_base_cam, K, dist, z_drop, xy_corr, place_dxy):
+    """投放像素 → 物料坐标 (mm)。返回 (x, y) 或 None（射线与桌面无交点）。
+
+    两条路径共用：手点的 `[5.5]` 和外部给像素的 `--drop-u/--drop-v`
+    （脑电选点走后者）。别在这里加"只有手点才有的东西"。
+    """
+    P = pixel_to_base(u, v, T_base_cam, K, dist, z_drop)
+    if P is None:
+        return None
+    P_drop = np.array([P[0] * 1000.0, P[1] * 1000.0, P[2] * 1000.0])
+    if xy_corr is not None:
+        P_used = apply_xy_correction(P_drop, xy_corr)
+        fix = P_used[:2] - P_drop[:2]
+        print("  原始投影 (%+.0f, %+.0f) mm，XY 修正 %+.1f/%+.1f mm"
+              % (P_drop[0], P_drop[1], fix[0], fix[1]))
+    else:
+        P_used = P_drop
+    return np.array(P_used[:2], dtype=np.float64) + place_dxy
 
 
 def choose_place_slot(obj_y_mm, args):
@@ -805,6 +897,7 @@ class Peek:
 
 # ---------------------------------------------------------------- 主流程
 def main():
+    global Z_CMD_OFFSET_M        # 必须先声明：下面 argparse 的默认值要读它
     ap = argparse.ArgumentParser(description="视觉引导抓取（一条命令）")
     ap.add_argument("--dry-run", action="store_true", help="只算目标点并出图，不动机械臂")
     ap.add_argument("--u", type=float, default=None, help="手动指定像素 u")
@@ -812,6 +905,10 @@ def main():
     ap.add_argument("--z-grasp", type=float, default=None, help="抓取平面高度（米）")
     ap.add_argument("--dz", type=float, default=0.0, help="抓取高度微调（米），负数更低")
     ap.add_argument("--standoff", type=float, default=0.06, help="预抓取抬高（米），默认 60mm")
+    ap.add_argument("--lift-extra", type=float, default=60.0, metavar="MM",
+                    help="夹住后**再**额外抬高多少 mm（默认 60）。只影响抬起那一步，"
+                         "不动预抓取点 —— 抬不够高、横移会蹭到东西时就加这个。"
+                         "2026-11-01 实测默认 60 才够（原来 0 时横移会蹭已放物料）")
     ap.add_argument("--min-pre-z", type=float, default=0.13,
                     help="预抓取最低高度（米），默认 0.13")
     ap.add_argument("--tol", type=float, default=15.0,
@@ -845,7 +942,7 @@ def main():
     ap.add_argument("--auto-place", action="store_true",
                     help="不点选投放位置，直接用 --place 的自动规则（默认会弹窗让你点）")
     ap.add_argument("--drop-rect", type=float, nargs=4,
-                    default=[0.38, -0.25, 0.55, 0.25],
+                    default=[0.38, -0.30, 0.60, 0.30],
                     metavar=("X1", "Y1", "X2", "Y2"),
                     help="画在画面上的推荐投放区（物料坐标，米），"
                          "默认 x 0.38~0.55、y -0.25~0.25")
@@ -856,12 +953,33 @@ def main():
     ap.add_argument("--place-dxy", type=float, nargs=2, default=None,
                     metavar=("DX", "DY"),
                     help="点选投放的固定微调（物料坐标 mm），比如放下去总是偏 "
-                         "y+8 就写 --place-dxy 0 -8")
+                         "y+8 就写 --place-dxy 0 -8。注意方向是**世界系**："
+                         "x+ = 远离底座，y+ = 往画面左侧偏")
+    ap.add_argument("--place-lift", type=float, default=0.0, metavar="MM",
+                    help="搬运时比投放高度再抬多高（mm）。**默认 0 = 老行为**"
+                         "（用出发时的 z 当悬停高度）。传 130 才会抬到"
+                         "『投放高度+130』，用于避免横移时撞倒已经放好的物料。"
+                         "三色流程（cap/vision_arm_color.py）会自己传这个值，"
+                         "单独用本脚本时保持 0 就不会改变原有动作")
+    ap.add_argument("--verbose", action="store_true",
+                    help="把每步的关节角等细节都打出来（排查姿态问题时用）")
+    ap.add_argument("--lift-pull-r", type=float, default=0.0, metavar="MM",
+                    help="抬起时若水平半径超过这个值，就**斜着往回收**再抬。"
+                         "**默认 0 = 老行为**（纯垂直抬）。传 500 会让伸展位形"
+                         "（半径 600mm 以上）也能升上去 —— 那个位形垂直抬不动。"
+                         "同样由三色流程自己传")
     ap.add_argument("--save-place-dxy", action="store_true",
                     help="把本次 --place-dxy 写进 xy_correction.json，下次不用再写")
+    ap.add_argument("--place-dz", type=float, default=None, metavar="MM",
+                    help="投放松爪高度的微调（mm，负数更低）。默认读 json 的 "
+                         "place_dz_mm；只影响松爪那一步，不动抓取")
     ap.add_argument("--drop-z", type=float, default=None, metavar="M",
                     help="点选投放时用的桌面高度（米）。默认用 z_g - 物料高/2，"
                          "即把物料中心高度换算成桌面；还偏高/偏低就用它微调")
+    ap.add_argument("--drop-u", type=float, default=None,
+                    help="外部给定投放像素 u（脑电/上位机用），给了就不弹窗点选")
+    ap.add_argument("--drop-v", type=float, default=None,
+                    help="外部给定投放像素 v，需与 --drop-u 一起用")
     ap.add_argument("--place-left", type=float, nargs=2, default=[0.46, 0.11],
                     metavar=("X", "Y"), help="左侧投放槽（物料坐标，米），默认 0.46 0.11")
     ap.add_argument("--place-right", type=float, nargs=2, default=[0.46, -0.10],
@@ -874,8 +992,20 @@ def main():
                     help="y 超过这个绝对值就算在左/右侧，默认 30mm")
     ap.add_argument("--no-place", action="store_true",
                     help="抓成功后不要放回原处（默认会放回去，方便连续试）")
+    ap.add_argument("--place-only", action="store_true",
+                    help="**物料已经在爪里**：跳过拍照/找抓点/下降/闭合，"
+                         "直接从投放段开始（--drop-u/--drop-v 给投放点）。"
+                         "三色流程的\"举起→拍投放侧→选贴纸→放下\"用它")
+    ap.add_argument("--hold-here", action="store_true",
+                    help="配合 --no-place：举着物料停在原地、不回 home。"
+                         "给三色流程拍投放侧照片用（回 home 会把物料搬出视野）")
     ap.add_argument("--no-home", action="store_true",
                     help="跳过开始前的复位（默认会先回 home，避免从上次失败的位置起步）")
+    ap.add_argument("--z-offset-mm", type=float, default=Z_CMD_OFFSET_M * 1000.0,
+                    help="命令端 z 补偿（mm），默认 %.1f；想让整体再降就传负数"
+                         % (Z_CMD_OFFSET_M * 1000.0))
+    ap.add_argument("--no-z-offset", action="store_true",
+                    help="关掉 z 命令补偿（回到 2026-10-26 之前的行为）")
     ap.add_argument("--no-zfix", action="store_true",
                     help="不做 z 落点补偿（默认会量一次偏差再补发一次，把落点压进 ±3mm）")
     ap.add_argument("--no-force", action="store_true", help="目标超工作区时不自动加 --force")
@@ -885,21 +1015,37 @@ def main():
                     help="叠加结果图保存路径")
     args = ap.parse_args()
     install_sigint()        # Ctrl+C = 取消当前动作 + 保持位置，不是直接退出
+    global VERBOSE, QUIET
+    VERBOSE = bool(getattr(args, "verbose", False))
+    if VERBOSE:
+        QUIET = False       # --verbose 要全部输出，别精简
+
+    Z_CMD_OFFSET_M = 0.0 if args.no_z_offset else args.z_offset_mm / 1000.0
+    if Z_CMD_OFFSET_M:
+        print("  z 命令补偿 %+.1f mm（把臂的实际落点对齐到计划高度，"
+              "随姿态会有几毫米漂移）" % (Z_CMD_OFFSET_M * 1000.0))
 
     # ---- 0) 相机 + 画面窗口（单窗口、主线程刷新、相机全程常开）
     global PEEK
-    try:
-        cam = LiveCam()
-    except Exception as e:
-        print("❌ 相机打不开：%s" % e)
-        return 1
-    lv = Peek(cam, enable=not args.no_show)
-    PEEK = lv
-    atexit.register(cam.release)
-    atexit.register(lv.close)
-    if lv.on:
-        lv.set_status("[0/7] idle")
-        print("实时画面已开启（窗口 vision_pick，动作期间也持续刷新）")
+    # --place-only 用不到相机（物料就在爪里，投放点由像素参数给定）。
+    # 更关键的是：这时候相机正被 cap/vision_arm_color.py 拿着，
+    # 硬开只会抢失败。所以这一支不走 LiveCam，把它置 None。
+    if args.place_only:
+        cam, lv, PEEK = None, None, None
+        print("--place-only：不开相机窗口（投放点由 --drop-u/--drop-v 指定）")
+    else:
+        try:
+            cam = LiveCam()
+        except Exception as e:
+            print("❌ 相机打不开：%s" % e)
+            return 1
+        lv = Peek(cam, enable=not args.no_show)
+        PEEK = lv
+        atexit.register(cam.release)
+        atexit.register(lv.close)
+        if lv.on:
+            lv.set_status("[0/7] idle")
+            print("实时画面已开启（窗口 vision_pick，动作期间也持续刷新）")
     click_mode = args.click and args.u is None
 
     # ---- 1) 标定参数
@@ -938,6 +1084,14 @@ def main():
         place_dxy = np.array([xy_corr[7], xy_corr[8]], dtype=np.float64)
     else:
         place_dxy = np.zeros(2)
+    # 投放的 z 微调（mm，负数=更低）。只作用于"松爪那一步"，不动抓取，
+    # 也不进投影平面（z_drop 还兼做像素反算，不能拿来补）。
+    if args.place_dz is not None:
+        place_dz = float(args.place_dz)
+    elif xy_corr is not None:
+        place_dz = float(xy_corr[9])
+    else:
+        place_dz = 0.0
     if args.place_dxy and args.save_place_dxy:
         try:
             j = json.load(open(XY_JSON, encoding="utf8"))
@@ -949,25 +1103,6 @@ def main():
                   % (place_dxy[0], place_dxy[1]))
         except Exception as e:
             print("⚠ 投放微调没保存成功：%s" % e)
-
-    # ---- 2) 先回 home 再拍
-    # 臂如果停在物料上方，会正好把物料挡在身后（2026-10-21 实际踩到：
-    # 抓空后臂悬在 z=116mm，拍到的画面里物料被两指完全遮住）。
-    if args.dry_run:
-        print("dry-run：不动机械臂。若画面里找不到物料，先手动回 home：")
-        print("  ./scripts/roarm_cli.py home --wait 20")
-    elif args.no_home:
-        print("[0/7] --no-home：跳过复位，直接拍照")
-    else:
-        print("[0/7] 复位到 home（先让臂离开相机视线）")
-        # home 只是"挪开让相机看得见物料"，不需要精度；而且这台臂有固定偏差
-        # （目标 365 → 落点 354，x 还偏 +4mm），用默认 5mm 容差必然判失败，
-        # 还会白等满 30 秒。所以这里单独放宽到 25mm。
-        rc, out = run_cli(["home", "--wait", "%.1f" % args.wait, "--tol", "40.0"],
-                          timeout=args.wait + 25)
-        show(out)
-        if rc != 0:
-            print("  ⚠ home 没进 25mm（臂有固定偏差属正常），继续下一步")
 
     def go_home(label="[7/7] 闭合夹爪并回 home", close_grip=True):
         """收尾：先把夹爪闭合（收拢、不张着），再回 home。"""
@@ -985,6 +1120,215 @@ def main():
             print("  ⚠ home 没进 40mm（臂有固定偏差），不影响下一轮")
         if lv is not None:
             lv.set_status("[7/7] done - at home")
+
+
+    def do_place(manual_slot, from_point, where=None):
+        """物料已在爪里 → 移到投放点 → 下降 → 松爪 → 抬起 → 回 home。
+
+        抽成闭包是为了支持 `--place-only`（三色流程分两段：先夹起来拍照，
+        再决定放哪个颜色上）。正常流程也用这一个，避免两份"投放动作"
+        以后各改一半。`from_point` 是起始高度参考（一般就是 pre）。
+        """
+        # ⚠ `d_mm` / `tgt` 这两个量只在"抓+放一次做完"那条路径上算过
+        #   （`d_mm = R @ off_mm`、`tgt = P_mm + d_mm`，在第 1259~1261 行）。
+        #   `--place-only` 在更早的地方就 return 了，**根本走不到那里**，
+        #   闭包捕获的是未赋值的自由变量 → 运行时 NameError。
+        #   2026-10-28 真机连崩两次：先 d_mm，再 tgt（物料一直举在爪里）。
+        #   这里就地重建，值完全一样，且不依赖执行顺序：
+        #     · d_loc：夹爪偏移的世界系向量，只跟姿态和 off_mm 有关
+        #     · tgt_z：抓取时 link6 的高度 = 物料中心平面 + d_loc[2]，
+        #              投放高度就是它 +8mm
+        #     · 回退用的 xy：抓取路径回退到"原处"（物料原位），
+        #              `--place-only` 物料已经在爪里、没有"原位"，
+        #              退回**当前位置**（那才是它现在待的地方）
+        d_loc = R @ off_mm
+        tgt_z = float(z_g) * 1000.0 + d_loc[2]
+        try:
+            home_xy = (float(from_point[0]), float(from_point[1]))
+        except Exception:
+            home_xy = (479.0, 0.0)      # home 的 xy（mm）
+        if manual_slot is not None:
+            # 已经是物料坐标（mm），直接加夹爪偏移
+            cand = np.array([manual_slot[0] + d_loc[0], manual_slot[1] + d_loc[1],
+                             tgt_z + 8.0])
+            bad = out_of_bounds(tuple(v / 1000.0 for v in cand))
+            rad = float(np.hypot(cand[0], cand[1]))
+            if bad:
+                print("  ⚠ 投放点超出工作区（%s），改放在当前位置下方" % "、".join(bad))
+                pl6 = np.array([home_xy[0], home_xy[1], tgt_z + 8.0])
+                where = "当前位置"
+            elif rad > 650.0:
+                print("  ⚠ 投放点距底座 %.0f mm（舒适区 650），太远容易卡，"
+                      "改放在当前位置下方" % rad)
+                pl6 = np.array([home_xy[0], home_xy[1], tgt_z + 8.0])
+                where = "当前位置"
+            else:
+                pl6 = cand
+                where = where or "你点的位置"
+        else:
+            slot = choose_place_slot(P_mm[1], args)
+            if slot is None:
+                pl6 = np.array([home_xy[0], home_xy[1], tgt_z + 8.0])
+                where = "原处"
+            else:
+                # 物料坐标 → link6 目标（同一个夹爪偏移，只是 xy 换了）
+                cand = np.array([slot[0] + d_loc[0], slot[1] + d_loc[1],
+                                 tgt_z + 8.0])
+                bad = out_of_bounds(tuple(v / 1000.0 for v in cand))
+                if bad:
+                    print("  ⚠ 投放点超出工作区（%s），改放回原处" % "、".join(bad))
+                    pl6 = np.array([home_xy[0], home_xy[1], tgt_z + 8.0])
+                    where = "原处"
+                else:
+                    pl6 = cand
+                    where = "左" if slot[1] > 0 else "右"
+        # 投放的 z 微调：只改"松爪那一步"的 link6 高度，不动抓取、不动投影。
+        if place_dz:
+            pl6 = np.array([pl6[0], pl6[1], pl6[2] + place_dz])
+            print("  投放高度微调 %+.1f mm → link6 z=%.1f mm" % (place_dz, pl6[2]))
+        # 投放点的半径检查（2026-11-01）：650 → **670**。
+        # 原来卡 650 是因为"松爪后原地垂直抬起"在伸展位形抬不动（633 卡死两次）。
+        # 现在那段已经改成「先直上 25mm 脱离物料 → 再按 pull_in 斜着往回收」，
+        # 和 [5/7] 抬起同一套办法，所以远一点也能起来。
+        # 上限取 670：整臂全伸展约 685，留 15mm 余量给 FK 误差。
+        # 抓取那条线仍是 650 —— 抓取要"下降+夹+带物抬升"，比投放吃力。
+        _rad = float(np.hypot(pl6[0], pl6[1]))
+        if _rad > 670.0 and not args.allow_far:
+            print("  ⛔ 投放点在 %.0f mm 处，超过可控范围（670mm），不硬放。"
+                  % _rad)
+            print("     物料还在爪里，先手动放下：")
+            print("       ./scripts/roarm_cli.py grip open --wait 10")
+            print("       ./scripts/roarm_cli.py home --wait 25 --tol 40 --close-grip")
+            print("     → 把色纸/投放位置往底座方向挪 50~80mm，")
+            print("       或者把 --place-dxy 的 x 调小（它会把投放点整体往远处推）。")
+            return 1
+        # ---- 搬运高度（2026-10-28 用户实测："挪过来的时候会把已经放置的撞倒"）
+        # 原来用 `from_point[2]`（出发时的 z，place-only 下只有 106mm 左右），
+        # 而**已经放好的物料顶面在 z≈128mm**（桌面 57.6 + 物料高 70）。
+        # link6 在 106 时，夹着的那个物料底部才 106-23.6-35 ≈ 47mm ——
+        # 比桌面上已经放好的物料低了 80mm，横着扫过去必然把它们撞倒。
+        # 现在：搬运高度 = 投放高度 + `--place-lift`（默认 130mm）→ 约 197mm，
+        # 物料底部 ≈138mm，比已放物料顶面高 10mm，留出余量。
+        travel_z = max(float(from_point[2]),
+                       float(pl6[2]) + float(args.place_lift))
+        # 先**原地直着抬起来**再横向走。直接斜着飞去悬停点，
+        # 路径的下半段仍然贴着台面，一样会扫倒东西。
+        if float(from_point[2]) < travel_z - 5.0:
+            print("  先原地抬到 z=%.0fmm（高于已放物料顶面 ≈%.0fmm）再横向移动"
+                  % (travel_z, travel_z - 23.6 - 35.0))
+            # 同样要斜着抬：起始点可能就在伸展极限上（半径 600+），
+            # 垂直抬不动，往底座方向收一点才能起来。见 pull_in()。
+            _up = pull_in(np.array([float(from_point[0]), float(from_point[1]),
+                                    travel_z]), args.lift_pull_r)
+            cli_pose(_up,
+                     args.wait, max(args.tol, 22.0), not args.no_force,
+                     args.allow_far, settle=False)
+        # 再在**这个高度**平移到投放点正上方，最后垂直下落
+        hover = np.array([pl6[0], pl6[1], travel_z])
+        rc, act_h = cli_pose(hover, args.wait, max(args.tol, 22.0),
+                             not args.no_force, args.allow_far, settle=False)
+        if rc != 130 and act_h is not None:
+            # 平移到不到位（这台臂在伸展姿态常差 10~20mm），下面那段"垂直下落"
+            # 就会变成斜着落，物料落地偏一截。好在悬停高度离台面还有 60mm，
+            # 可以在**这个高度**把 xy 补回来（绝不能在贴着台面时横着走）。
+            ex, ey = hover[0] - act_h[0], hover[1] - act_h[1]
+            # 阈值 8→15mm：这台臂平移到位的重复性本身就有 10~20mm，
+            # 8mm 意味着几乎每次都要多走一趟（2026-11-01 实测两轮都触发，
+            # 各多花 1~3 秒）。15mm 以内直接下落，落地偏差仍在可接受范围。
+            if abs(ex) + abs(ey) > 15.0:
+                fix = np.array([hover[0] + ex, hover[1] + ey, hover[2]])
+                print("  悬停落点差 (%+.0f, %+.0f) mm，在悬停高度补一次再下落"
+                      % (act_h[0] - hover[0], act_h[1] - hover[1]))
+                cli_pose(fix, args.wait, max(args.tol, 22.0), not args.no_force,
+                         args.allow_far, settle=False)
+        # 下落这一段必须量高度：臂在伸展姿态常比目标高 10~15mm，直接从高处松爪
+        # 物料会砸下去弹跳/歪掉（只补"偏高"这一侧，偏低不动，免得压进桌面）。
+        if args.no_zfix:
+            rc, act_b = cli_pose(pl6, args.wait, args.tol, not args.no_force,
+                                 args.allow_far, settle=False)
+        else:
+            rc, act_b = cli_pose_zfix(pl6, args.wait, args.tol, not args.no_force,
+                                      args.allow_far)
+        if act_b is None:
+            print("  ⚠ 降不到放置高度，物料还在夹爪里，请手动处理（或 --no-place）")
+            return 1
+        cli_grip("open", 15)
+        print("  已松爪，物料落在%s（物料坐标 %+.0f, %+.0f mm）"
+              % (where, pl6[0] - d_loc[0], pl6[1] - d_loc[1]))
+        if act_b is not None:
+            # 落点差：目标 vs 实际。里面含"机械臂自身落点误差"（不含视觉/夹爪偏移），
+            # 以后觉得放得偏，先看这一行判断是臂走不准还是点位算错。
+            print("  link6 实际落点比目标 (%+.1f, %+.1f) mm（臂自身误差，"
+                  "偏得多就调 --place-dxy）"
+                  % (act_b[0] - pl6[0], act_b[1] - pl6[1]))
+        # 松爪后必须**先在原地垂直抬起**再横向离开：此时两指还在物料两侧，
+        # 斜着回 pre 会横扫过去把刚放下的物料刮倒（2026-10-23 实测）。
+        # 抬到和搬运同样的 travel_z —— 用 from_point[2] 会抬得太低，
+        # 接下来回 home 的横向路径会蹭到这一轮刚放下的物料。
+        lift = np.array([pl6[0], pl6[1], travel_z])
+        # 2026-11-01：伸展区（半径 600+）原地直上抬不动 —— 633mm 处松爪后
+        # 抬 z 卡满 90 秒，连卡两次。这里加"先脱开、再斜收"两步：
+        #   ① 垂直抬 25mm 脱离物料（此时两指还在物料两侧，直接斜收会刮倒）
+        #   ② 再按 pull_in 往底座方向收着往上（和 [5/7] 抬起同一个办法）
+        _lift0 = np.array([pl6[0], pl6[1], min(travel_z, pl6[2] + 25.0)])
+        cli_pose(_lift0, args.wait, max(args.tol, 22.0), not args.no_force,
+                 args.allow_far, settle=False)
+        lift = pull_in(lift, args.lift_pull_r)
+        if abs(lift[0] - pl6[0]) + abs(lift[1] - pl6[1]) > 3.0:
+            print("  伸展位形（半径 %.0fmm）→ 松爪后斜着往回收再抬升到 z=%.0f"
+                  % (float(np.hypot(pl6[0], pl6[1])), travel_z))
+        cli_pose(lift, args.wait, max(args.tol, 22.0), not args.no_force,
+                 args.allow_far, settle=False)
+        go_home()
+        return 0
+
+    # ---- 1.5) --place-only：物料已经在爪里，直接进投放段
+    # 为什么需要：三色流程要"先举起来、拍一张投放侧照片、看着贴纸决定放在哪"，
+    # 也就是抓和放必须分成两条命令。这一支把前面 1~5 步（回 home、拍照、
+    # 算抓点、下降、闭合、抬起）全部跳过，直接把"当前夹着的物料"送过去。
+    if args.place_only:
+        if args.drop_u is None or args.drop_v is None:
+            print("❌ --place-only 必须同时给 --drop-u / --drop-v（投放点）")
+            return 1
+        if args.dry_run:
+            print("--place-only --dry-run：不动机械臂")
+            return 0
+        print("\n[P/7] --place-only：物料已在爪里，跳过拍照/抓取")
+        slot = drop_slot_from_pixel(args.drop_u, args.drop_v, T_base_cam, K, dist,
+                                    z_drop, xy_corr, place_dxy)
+        if slot is None:
+            print("❌ 投放像素和桌面平面没有交点（点到地平线以上了？）")
+            return 1
+        print("  投放点：像素 (%.0f,%.0f) → 物料坐标 (%+.0f, %+.0f) mm"
+              % (args.drop_u, args.drop_v, slot[0], slot[1]))
+        # 此刻臂大概在哪：问一次真值，拿不到就用 home 高度兜底
+        cur_pose = read_pose()
+        if cur_pose is None:
+            print("  ⚠ 读不到当前位姿，按 home 高度估一个")
+            cur_pose = np.array([479.0, 0.0, 369.0])
+        return do_place(slot, cur_pose, where="你点的位置")
+
+    # ---- 2) 先回 home 再拍
+    # 臂如果停在物料上方，会正好把物料挡在身后（2026-10-21 实际踩到：
+    # 抓空后臂悬在 z=116mm，拍到的画面里物料被两指完全遮住）。
+    if args.dry_run:
+        print("dry-run：不动机械臂。若画面里找不到物料，先手动回 home：")
+        print("  ./scripts/roarm_cli.py home --wait 20")
+    elif args.no_home:
+        print("[0/7] --no-home：跳过复位，直接拍照")
+    else:
+        print("[0/7] 复位到 home（先让臂离开相机视线）")
+        # home 只是"挪开让相机看得见物料"，不需要精度；而且这台臂有固定偏差
+        # （目标 365 → 落点 354，x 还偏 +4mm），用默认 5mm 容差必然判失败，
+        # 还会白等满 30 秒。所以这里单独放宽到 25mm。
+        # --close-grip：复位前先把爪子收拢。开局爪子多半是张着 60mm 的
+        # （上一次跑完还没收，或者刚起栈），这么宽转位容易扫到桌面/色纸/线缆。
+        rc, out = run_cli(["home", "--wait", "%.1f" % args.wait, "--tol", "40.0",
+                           "--close-grip"],
+                          timeout=args.wait + 25)
+        show(out)
+        if rc != 0:
+            print("  ⚠ home 没进 25mm（臂有固定偏差属正常），继续下一步")
 
     # ---- 3) 拍照 + 检测
     print("拍照…")
@@ -1082,6 +1426,25 @@ def main():
     # ---- 4) 夹爪偏移
     d_mm = R @ off_mm
     tgt = P_mm + d_mm
+    # 2026-11-01 实测经验：抓取点 x 超过 520mm 后，臂在伸展位形的 FK 误差
+    # 变大，实际落点比命令位置偏 -20mm 左右，所以目标点补 +20。
+    # 这是**位置相关**的补偿（不像 xy_correction 那样是全局线性），
+    # 只在远端生效；改阈值前先确认远端抓取是不是真的偏。
+    x_comp = 0.0
+    if tgt[0] > 520.0:
+        x_comp = 20.0
+        tgt = tgt.copy()
+        tgt[0] += x_comp
+    # 2026-11-01 用户实测：**基座 x>500 且 y>130** 这一块（远 + 偏左），
+    # x 还要再收 8mm —— 那个象限里臂的 FK 误差方向跟别处相反。
+    # 用 P_mm（物料基座坐标）判断，不用 tgt —— 这是"物料在哪"的属性，
+    # 跟夹爪偏移无关，换爪也不会失效。
+    # 和上面的远端补偿会叠加：x=550/y=150 时 +20-8 = 净 +12。
+    if P_mm[0] > 500.0 and P_mm[1] > 130.0:
+        x_comp -= 8.0
+        tgt = tgt.copy()
+        tgt[0] -= 8.0
+        print("  右上象限补偿 -8.0 mm（基座 x>500 且 y>130）")
     pre_z = max(tgt[2] + args.standoff * 1000.0, args.min_pre_z * 1000.0)
     pre = np.array([tgt[0], tgt[1], pre_z])
 
@@ -1090,6 +1453,9 @@ def main():
     print("  夹爪偏移(局部) x=%+7.1f  y=%+7.1f  z=%+7.1f mm   ← %s"
           % (off_mm[0], off_mm[1], off_mm[2], off_src))
     print("  偏移(世界系)   x=%+7.1f  y=%+7.1f  z=%+7.1f mm" % tuple(d_mm))
+    if x_comp:
+        print("  远端 x 补偿   %+.1f mm（>520 加 20；基座右上象限再减 8）"
+              % x_comp)
     print("  link6 抓取点   x=%+7.1f  y=%+7.1f  z=%+7.1f mm" % tuple(tgt))
     print("  预抓取点       x=%+7.1f  y=%+7.1f  z=%+7.1f mm" % tuple(pre))
     far = [b for b in out_of_bounds(tuple(v / 1000.0 for v in tgt))
@@ -1097,17 +1463,26 @@ def main():
     if far:
         print("  ⛔ 抓取点超出工作区：%s" % "、".join(far))
         print("     夹爪偏移会让 link6 再往前 86mm，物料得往底座方向挪。")
-    # 半径检查：x/y 都在界内不等于"舒服"。这台臂全伸展约 685mm，
-    # 接近极限时规划会变得极慢甚至卡死（2026-10-23 实测：半径 675mm 时
-    # 预抓取那一步直接卡住不返回）。
+    # 半径上限：真抓 620mm、探物料 650mm（2026-11-01 实测：545 正常；
+    # 580 z 补发失败差 9mm；634 要求 z+5mm 反而掉 17mm；646/673 卡到超时）。
+    # probe 只悬停、不下降不夹，对 z 的要求低得多，所以放宽一档；
+    # 真抓要下降+夹+抬起，600 以上就开始不稳，卡 620。
     radius = float(np.hypot(tgt[0], tgt[1])) / 1000.0
-    if radius > 0.685:
-        print("  ⛔ 抓取点距底座 %.0f mm，超过伸展极限（约 685 mm），不硬发。" % (radius * 1000))
-        print("     把物料往底座方向挪 40mm 以上，或用 --allow-far 强行试。")
-        far = far or ["r=%.0fmm" % (radius * 1000)]
-    elif radius > 0.650:
-        print("  ⚠ 抓取点距底座 %.0f mm，接近伸展极限（约 685 mm）：" % (radius * 1000))
-        print("     这个位形下动作会明显变慢、z 也更容易偏，必要时把物料挪近 30~50mm。")
+    r_limit = 0.650
+    if radius > r_limit and not args.allow_far:
+        print("  ⛔ 抓取点距底座 %.0f mm，超过可控范围（%dmm），不硬发。"
+              % (radius * 1000, r_limit * 1000))
+        print("     臂在这个位形几乎伸直：z 方向会解出别的肘部构型，")
+        print("     实测 634mm 要它抬 5mm 反而掉 17mm，646/673mm 直接卡超时。")
+        print("     → 把物料往底座方向挪 50~80mm 再点；")
+        print("     → 确实要试就加 --allow-far（很大概率卡住）。")
+        return 1
+    if radius > r_limit:
+        print("  ⚠ --allow-far：抓取点距底座 %.0f mm，已超出可控范围，"
+              "z 很可能抬不起来。" % (radius * 1000))
+    elif radius > 0.550:
+        print("  ⚠ 抓取点距底座 %.0f mm，偏伸展（舒适区 550 以内）："
+              "会慢一些，z 精度也会差几毫米。" % (radius * 1000))
     print("──────────────────────────────────────────\n")
 
     view = img.copy()
@@ -1170,6 +1545,26 @@ def main():
             rec["note"] = "在「%s」被 Ctrl+C 中断" % step
             append_log(rec)
             print(_ABORT_HINT)
+            # 2026-11-01 用户要求：中断后**直接回 home**，别把臂扔在半路。
+            # 注意顺序：
+            #   ① 先清 _ABORT，否则 run_cli 一看到标志就把子进程 kill 掉，
+            #      下面两条命令根本发不出去；
+            #   ② 先 close 再 home —— 物料可能还在爪里，张着 60mm 横移更容易刮到
+            #      桌上的东西，收拢到 10mm 更稳（close 是留余量的，不会顶死）。
+            print("\n→ 中断后自动收爪 + 回 home（再按一次 Ctrl+C 可强制退出）")
+            _ABORT["flag"] = False
+            try:
+                cli_grip("close", 8)
+                rc_h, out_h = run_cli(
+                    ["home", "--wait", "20.0", "--tol", "40.0", "--close-grip"],
+                    timeout=45)
+                show(out_h)
+                print("  ✅ 已回 home" if rc_h == 0
+                      else "  ⚠ 回 home 没确认到位（臂有固定偏差属正常），位置大致在 home")
+            except KeyboardInterrupt:
+                print("\n⚠ 回 home 途中被再次 Ctrl+C，已放弃。请手动托住臂。")
+            except Exception as e:
+                print("  ⚠ 自动回 home 失败：%s（手动跑 roarm_cli.py home）" % e)
             return 130
         rec["note"] = "在「%s」失败" % step
         append_log(rec)
@@ -1212,18 +1607,23 @@ def main():
         rc, act = cli_pose(probe, args.wait, args.tol, not args.no_force,
                            args.allow_far)
         # 悬浮观察要看得准，两指的离地高度必须一致：这台臂在伸展姿态下
-        # z 常偏 10~14mm（今天实测 -13.8 / +7.1 都有），高度不齐会让人
-        # 从侧面看时误判前后距离。所以补发一次到真正的高度。
-        for _ in range(2):
+        # z 常偏 10~14mm（实测 -13.8 / +7.1 都有），高度不齐会让人
+        # 从侧面看时误判前后距离。
+        # 2026-11-01 调松：原来容差 4mm + 补两次，在半径 646mm 那种位形下
+        # 会来回追着补（-6.5 → +14.2 → 卡满 90 秒），越补越偏。
+        # 现在容差 10mm、只补一次、补发给 25 秒，补不动就带着这点高度差记录。
+        for _ in range(1):
             if act is None:
                 break
             dz = pz - act[2]
-            if abs(dz) <= 4.0:
+            if abs(dz) <= 10.0:
                 break
             print("  高度差 %+.1f mm，补发一次 z=%.1f" % (dz, probe[2] + dz))
+            # retries=0：伸展位形下补发大概率也到不了，重试只会再白等一轮
+            # （2026-11-01 在 634mm 处：补发 25 秒没到，又重试一轮，用户只能 Ctrl+C）
             rc, act = cli_pose(np.array([probe[0], probe[1], probe[2] + dz]),
-                               args.wait, args.tol, not args.no_force,
-                               args.allow_far)
+                               min(args.wait, 25.0), args.tol, not args.no_force,
+                               args.allow_far, retries=0)
         if act is not None:
             print("  目标 link6 (%+.1f, %+.1f, %+.1f)  实际 (%+.1f, %+.1f, %+.1f)"
                   % (*probe, *act))
@@ -1248,7 +1648,7 @@ def main():
             # 从侧面看两指的前后位置会被压缩，人眼很容易判错（2026-10-25
             # 两个点就是这么记废的，拟合出 A[1][0]=-0.136、RMS 10.9mm）。
             zerr = None if act is None else act[2] - probe[2]
-            if zerr is not None and abs(zerr) > 8.0:
+            if zerr is not None and abs(zerr) > 15.0:
                 print("\n  ⚠ 高度还差 %+.0f mm（目标 %.0f，实际 %.0f），"
                       "这个高度看两指会误判前后 —— **本次不记录**。"
                       % (zerr, probe[2], act[2]))
@@ -1323,7 +1723,21 @@ def main():
         lv.set_status("[5/7] lifting")
     # 带物抬升时臂会下沉 15~20mm，容差给到 30；并且用短 wait（25s）先试，
     # 真卡住最多等 25 秒，不会像以前那样一卡就两分钟。
-    rc, _ = lift_to(pre, args, tol=max(args.tol, 30.0))
+    # 抬起目标 = 预抓取点的 xy + 抬高 z。但**伸展位形要斜着抬**：
+    # 半径超过 --lift-pull-r 时把 xy 往底座方向收，z 保持 —— 见 pull_in()。
+    _up = pull_in(pre, args.lift_pull_r)
+    # --lift-extra：抬起目标再抬高这么多（mm）。默认 0 = 抬到预抓取高度。
+    # 2026-11-01 用户反馈"夹住后抬得不够高，横移会蹭"，所以加了这个口子。
+    # 只影响 [5/7] 抬起那一步，不动预抓取点（预抓取还是要低，好套物料）。
+    if args.lift_extra:
+        _up = _up.copy()
+        _up[2] += float(args.lift_extra)
+        print("  抬起额外抬高 %.0f mm → z=%.1f" % (args.lift_extra, _up[2]))
+    if abs(_up[0] - pre[0]) + abs(_up[1] - pre[1]) > 3.0:
+        print("  伸展位形（半径 %.0fmm）→ 抬起时**斜着往回收**到半径 %.0fmm，"
+              "否则抬不动" % (float(np.hypot(pre[0], pre[1])),
+                              float(np.hypot(_up[0], _up[1]))))
+    rc, _ = lift_to(_up, args, tol=max(args.tol, 30.0))
     if rc != 0:
         print("  ⚠ 抬起没确认到位，检查是否撞到东西")
 
@@ -1341,13 +1755,22 @@ def main():
 
     if args.no_place:
         print("   --no-place：物料留在夹爪里")
+        # 三色流程（vision_arm_color.py）要在这里接着拍照找投放色标：
+        # 所以**不能回 home**，就停在这个位置 —— 臂举着物料、桌面上半部分是干净的。
+        # 原来回 home 会把物料搬到相机视野外，就没法拍"投放侧"了。
+        if args.hold_here:
+            print("   --hold-here：停在这里（不回 home），等外部命令再来放")
+            if lv is not None:
+                lv.set_status("[HOLD] holding - waiting for place command")
+            return 0
         go_home(label="[7/7] 回到 home（夹爪夹着物料，不再闭合）",
                 close_grip=False)
         return 0
 
     # ---- 5.4) 后退让开视野：夹着物料时前臂会把桌面挡掉一大块
     cur_pose = np.asarray(pre, dtype=np.float64)   # 臂大致在哪（后退时从这里算）
-    if not args.auto_place and lv.on and args.drop_standoff > 0:
+    if (not args.auto_place and lv.on and args.drop_standoff > 0
+            and args.drop_u is None):
         print("\n[5.4/7] 后退让开视野")
         lv.set_status("[5.4/7] backing off")
         back = retreat_xy(cur_pose, args.drop_standoff)
@@ -1369,9 +1792,21 @@ def main():
                 print("  后退 %.0f mm 到 link6 (%+.0f, %+.0f, %+.0f)，"
                       "投放区应该看得见了" % (moved, *act))
 
-    # ---- 5.5) 点选投放位置（物料已在爪里、已抬起，画面里能看到桌面）
+    # ---- 5.5a) 外部给定投放像素（脑电选点 / 上位机调用）：不弹窗、不点选
     manual_slot = None          # 物料坐标（mm），None = 走 --place 的自动规则
-    if not args.auto_place and lv.on:
+    if args.drop_u is not None and args.drop_v is not None:
+        print("\n[5.5/7] 用外部给定的投放像素（--drop-u/--drop-v）")
+        slot = drop_slot_from_pixel(args.drop_u, args.drop_v, T_base_cam, K, dist,
+                                    z_drop, xy_corr, place_dxy)
+        if slot is None:
+            print("  ⚠ 该像素和桌面平面没有交点，改用自动换边")
+        else:
+            manual_slot = slot
+            print("  投放点：像素 (%.0f,%.0f) → 物料坐标 (%+.0f, %+.0f) mm"
+                  % (args.drop_u, args.drop_v, slot[0], slot[1]))
+
+    # ---- 5.5) 点选投放位置（物料已在爪里、已抬起，画面里能看到桌面）
+    if manual_slot is None and not args.auto_place and lv.on:
         print("\n[5.5/7] 点选投放位置")
         lv.set_status("[5.5/7] click drop area")
         x1, y1, x2, y2 = args.drop_rect
@@ -1423,22 +1858,12 @@ def main():
         if p is None:
             print("  没点选（或按了取消），改用自动换边")
         else:
-            P = pixel_to_base(p[0], p[1], T_base_cam, K, dist, z_drop)
-            if P is None:
+            slot = drop_slot_from_pixel(p[0], p[1], T_base_cam, K, dist, z_drop,
+                                        xy_corr, place_dxy)
+            if slot is None:
                 print("  ⚠ 这个像素和桌面平面没有交点，改用自动换边")
             else:
-                # 必须和抓取走同一套 XY 修正！pixel_to_base 给的是"相机测到"
-                # 的坐标，抓取那边已经用 calib_xy 的 A/b 换算成真实桌面坐标了。
-                # 之前投放漏了这一步，y 就按 1.27 倍缩放地偏（y=-150 处偏 49mm）。
-                P_drop = np.array([P[0] * 1000.0, P[1] * 1000.0, P[2] * 1000.0])
-                if xy_corr is not None:
-                    P_used = apply_xy_correction(P_drop, xy_corr)
-                    fix = P_used[:2] - P_drop[:2]
-                    print("  原始投影 (%+.0f, %+.0f) mm，XY 修正 %+.1f/%+.1f mm"
-                          % (P_drop[0], P_drop[1], fix[0], fix[1]))
-                else:
-                    P_used = P_drop
-                manual_slot = np.array(P_used[:2], dtype=np.float64) + place_dxy
+                manual_slot = slot
                 inside = True
                 if pts is not None:
                     try:
@@ -1457,82 +1882,7 @@ def main():
     print("\n[6/7] 投放物料")
     if lv is not None:
         lv.set_status("[6/7] placing")
-    if manual_slot is not None:
-        # 用户点选的位置：slot 已经是物料坐标（mm），直接加夹爪偏移
-        cand = np.array([manual_slot[0] + d_mm[0], manual_slot[1] + d_mm[1],
-                         tgt[2] + 8.0])
-        bad = out_of_bounds(tuple(v / 1000.0 for v in cand))
-        rad = float(np.hypot(cand[0], cand[1]))
-        if bad:
-            print("  ⚠ 你点的投放点超出工作区（%s），改放回原处" % "、".join(bad))
-            pl6 = np.array([tgt[0], tgt[1], tgt[2] + 8.0])
-            where = "原处"
-        elif rad > 650.0:
-            print("  ⚠ 你点的投放点距底座 %.0f mm（舒适区 650），太远容易卡，"
-                  "改放回原处" % rad)
-            pl6 = np.array([tgt[0], tgt[1], tgt[2] + 8.0])
-            where = "原处"
-        else:
-            pl6 = cand
-            where = "你点的位置"
-    else:
-        slot = choose_place_slot(P_mm[1], args)
-        if slot is None:
-            pl6 = np.array([tgt[0], tgt[1], tgt[2] + 8.0])
-            where = "原处"
-        else:
-            # 物料坐标 → link6 目标（同一个夹爪偏移，只是 xy 换了）
-            cand = np.array([slot[0] + d_mm[0], slot[1] + d_mm[1], tgt[2] + 8.0])
-            bad = out_of_bounds(tuple(v / 1000.0 for v in cand))
-            if bad:
-                print("  ⚠ 投放点超出工作区（%s），改放回原处" % "、".join(bad))
-                pl6 = np.array([tgt[0], tgt[1], tgt[2] + 8.0])
-                where = "原处"
-            else:
-                pl6 = cand
-                where = "左" if slot[1] > 0 else "右"
-    # 先在预抓取高度平移到投放点正上方，再垂直下落：斜着走会拖着物料横扫台面
-    hover = np.array([pl6[0], pl6[1], pre[2]])
-    rc, act_h = cli_pose(hover, args.wait, max(args.tol, 22.0), not args.no_force,
-                         args.allow_far, settle=False)
-    if rc != 130 and act_h is not None:
-        # 平移到不到位（这台臂在伸展姿态常差 10~20mm），下面那段"垂直下落"就会
-        # 变成斜着落，物料落地偏一截。好在悬停高度离台面还有 60mm，可以在**这个
-        # 高度**把 xy 补回来（绝不能在贴着台面时横着走，会刮到旁边的物料）。
-        ex, ey = hover[0] - act_h[0], hover[1] - act_h[1]
-        if abs(ex) + abs(ey) > 8.0:
-            fix = np.array([hover[0] + ex, hover[1] + ey, hover[2]])
-            print("  悬停落点差 (%+.0f, %+.0f) mm，在悬停高度补一次再下落"
-                  % (act_h[0] - hover[0], act_h[1] - hover[1]))
-            cli_pose(fix, args.wait, max(args.tol, 22.0), not args.no_force,
-                     args.allow_far, settle=False)
-    # 下落这一段必须量高度：臂在伸展姿态常比目标高 10~15mm，直接从高处松爪
-    # 物料会砸下去弹跳/歪掉，看起来就是"放得偏"（只补"偏高"这一侧，偏低不动，
-    # 免得把物料压进桌面）。
-    if args.no_zfix:
-        rc, act_b = cli_pose(pl6, args.wait, args.tol, not args.no_force,
-                             args.allow_far, settle=False)
-    else:
-        rc, act_b = cli_pose_zfix(pl6, args.wait, args.tol, not args.no_force,
-                                  args.allow_far)
-    if act_b is None:
-        print("  ⚠ 降不到放置高度，物料还在夹爪里，请手动处理（或 --no-place）")
-        return 1
-    cli_grip("open", 15)
-    print("  已松爪，物料落在%s（物料坐标 %+.0f, %+.0f mm）"
-          % (where, pl6[0] - d_mm[0], pl6[1] - d_mm[1]))
-    if act_b is not None:
-        # 落点差：目标 vs 实际。这里面含"机械臂自身落点误差"（不含视觉/夹爪偏移），
-        # 以后觉得放得偏，先看这一行判断是臂走不准还是点位算错。
-        print("  link6 实际落点比目标 (%+.1f, %+.1f) mm（臂自身误差，"
-              "偏得多就调 --place-dxy）" % (act_b[0] - pl6[0], act_b[1] - pl6[1]))
-    # 松爪后必须**先在原地垂直抬起**再横向离开：此时两指还在物料两侧，
-    # 从 90mm 高度斜着回 pre 会横扫过去把刚放下的物料刮倒（2026-10-23 实测）。
-    lift = np.array([pl6[0], pl6[1], pre[2]])
-    cli_pose(lift, args.wait, max(args.tol, 22.0), not args.no_force,
-             args.allow_far, settle=False)
-    go_home()
-    return 0
+    return do_place(manual_slot, pre, where=None)
 
 
 if __name__ == "__main__":
