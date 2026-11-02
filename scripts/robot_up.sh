@@ -10,7 +10,8 @@
 # 与 sim_up.sh 的区别：
 #   · 真机不用 sim_gripper_bridge —— robo_driver 直接订阅 set_angle_topic
 #   · 不摘 DISPLAY（rviz 要用）
-#   · 启动 driver 会让臂回到零位，且中途断电 50ms，**必须先托住**
+#   · 启动 driver **不会**让臂动（zero_on_start=false），只上力矩
+#   · 回零由本脚本最后一步做：MoveIt 规划 + 慢速，不是驱动那种 1.5 s 甩臂
 #
 # 日志：$WS/.robot_*.log
 
@@ -134,7 +135,10 @@ status() {
 }
 
 start_all() {
-  msg "${YEL}即将启动真机。driver 会先断电 50ms 再驱到零位 —— 请先托住机械臂。${RST}"
+  msg "${YEL}即将启动真机。${RST}"
+  msg "  · driver 启动只上力矩、不会动"
+  msg "  · 最后一步会自动回零（MoveIt 慢速规划），臂会从这里运动到 home"
+  msg "  · 不想回零：AUTO_HOME=false bash scripts/robot_up.sh"
   msg "周围无人、电源开关在手边。"
   printf '继续？[y/N] '
   read -r ans
@@ -217,12 +221,19 @@ start_all() {
   # 不想回零：AUTO_HOME=false bash scripts/robot_up.sh
   local auto_home="${AUTO_HOME:-true}"
   if [ "$auto_home" = "true" ]; then
-    msg "自动回零（MoveIt 规划，约 10~30 s；AUTO_HOME=false 跳过）…"
-    if $PY "$SCRIPT_DIR/roarm_cli.py" home --wait 60 --tol 25; then
+    msg "自动回零（MoveIt 规划；AUTO_HOME=false 跳过）…"
+    # 180 s 不是随手写的：从折叠态（j2/j3 各差 90°）展开到 home 是大行程，
+    # velocity_scaling=0.05 下要 1~2 分钟。原来给 60 s 会在半路报"未到位"，
+    # 而 --wait 超时**不会让轨迹停下**，臂还在走 —— 后面紧接着发命令就会打架。
+    if $PY "$SCRIPT_DIR/roarm_cli.py" home --wait 180 --tol 25; then
       ok "已回零"
     else
-      warn "回零没成功，臂仍停在原处。手动重试："
-      msg "  ${DIM}$PY $SCRIPT_DIR/roarm_cli.py home --wait 60 --tol 25${RST}"
+      warn "回零没到位。注意：--wait 超时只表示「不再等」，臂可能还在走。"
+      msg "  先确认停在哪，再决定下一步："
+      msg "  ${DIM}$PY $SCRIPT_DIR/roarm_cli.py where${RST}"
+      msg "  ${DIM}$PY $SCRIPT_DIR/roarm_cli.py home --wait 180 --tol 25${RST}"
+      msg "  若反复失败（规划不出来），看 ${NODELOG}，或先无力矩逼近："
+      msg "  ${DIM}$PY $SCRIPT_DIR/go_zero.py --preset park${RST}"
     fi
   else
     msg "AUTO_HOME=false：跳过回零，臂停在当前姿态（已上力矩）"
