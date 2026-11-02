@@ -152,8 +152,14 @@ start_all() {
   : > "$PIDFILE"
 
   # ---- 1) driver（robo_driver + cello_controller）
-  msg "启动 driver…"
-  setsid ros2 launch cello_moveit_config driver.launch.py > "$DRVLOG" 2>&1 &
+  # ZERO_ON_START=false（默认）：只上力矩保持当前姿态，不动。
+  #   从前驱动一启动就驱零位、1.5 s 内完成；臂若停在折叠态（j2/j3 各差 90°）
+  #   等于满速展开整臂，2026-11-02 就这么摔过一次。
+  # 需要回零：python3 scripts/roarm_cli.py home（MoveIt 规划，速度可控）
+  local zero_start="${ZERO_ON_START:-false}"
+  msg "启动 driver…（zero_on_start=${zero_start}）"
+  setsid ros2 launch cello_moveit_config driver.launch.py \
+    zero_on_start:="$zero_start" > "$DRVLOG" 2>&1 &
   local drv_pid=$!
   echo "$drv_pid" >> "$PIDFILE"
   wait_for_log "$DRVLOG" "初始化完成\|Initialization complete" 20 "cello_driver" || { stop_all; exit 1; }

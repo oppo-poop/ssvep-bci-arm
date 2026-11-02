@@ -136,9 +136,15 @@ class Arm_contorl(Node):
         self.declare_parameter("robo_type", "robo")
 
         self.declare_parameter('lock', 'enable')
+        #: 启动时是否驱到零位。默认 False —— 上电只"保持当前姿态"。
+        #: 原因见 hold_current_pose() 的注释：2026-11-02 从折叠态启动，
+        #: 1.5 s 内要转 90°，展开到一半整臂失力摔了。
+        self.declare_parameter('zero_on_start', False)
 
         self.robo_type = (self.get_parameter("robo_type").get_parameter_value().string_value)
         self.lock = (self.get_parameter("lock").get_parameter_value().string_value)
+        self.zero_on_start = (
+            self.get_parameter("zero_on_start").get_parameter_value().bool_value)
 
         try:
             self.Servo = uservo_ex(self.robo_type,log = self.get_logger())
@@ -148,8 +154,14 @@ class Arm_contorl(Node):
         # self.target_angle 初始目标角度列表 / initial target angle list
         self.interval = [1500 for _ in range(self.Servo.SRV_NUM)]
         self.current_angle = [0.0 for _ in range(self.Servo.SRV_NUM)]
-        if(self.lock == "enable"):
-            self.arm_move_by_time()
+        if self.lock == "enable":
+            if self.zero_on_start:
+                # 旧行为：直接驱到 ZERO_ANGLE。臂若停在折叠态，等于满速展开。
+                self.get_logger().warn(
+                    "zero_on_start=true：正在驱到零位（臂会大幅运动，注意）")
+                self.arm_move_by_time()
+            else:
+                self.hold_current_pose()
         else:
             self.Servo.disable_torque(0xff)
 
@@ -202,6 +214,47 @@ class Arm_contorl(Node):
                 )
             )
         self.joint_states_publisher.publish(JointState_msg)
+
+    def hold_current_pose(self):
+        """上力矩并**保持当前姿态**，不做任何运动。
+
+        为什么不用 arm_move_by_time() 直接驱零位
+            原来的一行 `self.arm_move_by_time()` 目标是 ZERO_ANGLE（各关节约 0°），
+            interval 固定 1500 ms。臂若停在折叠态（实测 j2=-90.5°、j3=+89.5°），
+            等于 1.5 秒内各转 90° 展开整臂 —— 重心外移、j2 力臂变长，
+            力矩在中段达到峰值。2026-11-02 就是这么摔的：展开到一半整臂失力。
+
+        为什么"读什么发什么"
+            reset_multi_turn_angle() 只发请求、不等确认（SDK 里没有响应处理），
+            所以"多圈 0 == 当前位置"这个前提**不可靠**。写死 0 可能反而触发大动作。
+            读回来的多圈角作为目标，天然等于"原地不动"。
+
+        读不全就一条命令都不发
+            目标里混进一个 ZERO_ANGLE 就会让那个关节动起来。
+            上电时舵机本身带力矩，不发命令是安全的。
+        """
+        targets = []
+        for i in range(self.Servo.SRV_NUM):
+            try:
+                a = self.Servo.uservo.query_servo_mturn_angle(i, realtime=True)
+            except Exception as e:                    # noqa: BLE001
+                self.get_logger().error("读舵机 %d 多圈角异常：%s" % (i, e))
+                a = None
+            if a is None:
+                self.get_logger().error(
+                    "启动保持姿态失败：读不到舵机 %d 的多圈角。"
+                    "**不发任何运动命令**（舵机自身带力矩，臂保持原位）。"
+                    "先跑 scripts/servo_check.py 查通信。" % i)
+                return False
+            targets.append(int(round(10 * float(a))))
+
+        self.target_angle = targets
+        self.interval = [3000 for _ in range(self.Servo.SRV_NUM)]
+        self.arm_move_by_time()
+        self.get_logger().info(
+            "启动保持当前姿态（未驱零位）：%s"
+            % ["%.1f" % (t / 10.0) for t in targets])
+        return True
 
     # 默认：控制by时间 / Default control mode: time-based
     def arm_move_by_time(self):
