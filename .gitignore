@@ -26,3 +26,6 @@ data/runs/*.log
 
 # 标定文件的临时备份（fix_extrinsics 生成）
 *.bak
+
+# 抓取日志：运行时逐条追加，进仓库只会不断冲突
+data/vision/pick_log.csv
