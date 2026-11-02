@@ -67,6 +67,10 @@ DEFAULT_ACC_TIME / DEC_TIME = 50 ms    ← 脑控场景应显式放长
 **通信是否健康**用 `python3 scripts/servo_check.py` 一次查完（只读不驱动）：
 设备/权限/占用 → 波特率 → 7 个 ID 在线与丢包 → 电压/温度 → 夹爪开度。
 
+判据阈值在文件头部常量里，**换电池/换供电要改**：
+本机是幻尔 RX8/RA8 系列（12 V 供电，实测 11.8~12.2 V），默认按 3S 锂电设的
+`VOLT_WARN=11.0 / VOLT_FAIL=10.2`。若用 2S 锂电供的舵机，改成 7.0 / 6.4。
+
 ## 会咬人的环境约束
 
 1. **仓库路径必须纯 ASCII**。`rosidl_generate_interfaces` 在 `通` 字处截断，`colcon build` 必失败。
@@ -170,7 +174,7 @@ ros2 run roarm_task task --scene data/scene_real.yaml --phase place
 **臂不动、读数不对、或换了一台机器时，先跑这个**（机械臂要停掉，驱动会独占串口）：
 
 ```bash
-python3 scripts/servo_check.py              # 完整检查，约 3 秒
+python3 scripts/servo_check.py              # 完整检查，约 5 秒
 python3 scripts/servo_check.py --ping-only  # 只测 7 个 ID 在不在线
 python3 scripts/servo_check.py --mock       # 没有硬件时验证输出与判据
 ```

@@ -15,9 +15,17 @@
 它检查什么（五层，从下往上）
     1. 设备层   /dev/ttyUSB0 存在？权限够？被谁占着？
     2. 链路层   哪个波特率能通？
-    3. 总线层   7 个 ID 谁在线？响应多快？丢包多少？
+    3. 总线层   7 个 ID 谁在线？ping 往返多少？丢包多少？
     4. 数据层   角度是否合理？夹爪开度换算多少？
     5. 供电层   电压、温度、状态字
+
+⚠ 关于"响应时间"这个指标的坑
+    SDK 的 ping() / query_*() 内部都是 `update(wait_response=True)`，而 update 的
+    循环是"没有新数据就一直转，直到 timeout"，**没有提前 break**，默认 timeout
+    正好 0.1 s。所以用它们计时，无论舵机多快，测出来永远是 100 ms。
+
+    本脚本自己发包、自己轮询（timed_ping），1 Mbaud 下正常值 1~5 ms。
+    这个数字才有诊断价值：某一路到 30 ms，就是那根线/那个接口开始劣化了。
 
 这个脚本绝不做的
     · 不发任何运动指令（不调 set_angle / send_sync_*）
@@ -74,11 +82,18 @@ GRIP_DEG_RANGE = (21.0, 101.0)
 ARM_DEG_SANE = (-360.0, 360.0)
 
 #: 判据阈值。**按你的电池/负载改这三行**，别照抄。
-VOLT_WARN = 6.4          # 低于此值：2S 锂电快没电 / 线损过大
-VOLT_FAIL = 5.8          # 低于此值：舵机会反复复位，读数不可信
+#: 本机是幻尔 RX8/RA8 系列（12 V 供电），实测满电 12.0~12.2 V。
+#: 若换成 2S 锂电（7.4 V 标称）供的舵机，改成 7.0 / 6.4。
+VOLT_WARN = 11.0         # 低于此值：3S 锂电约剩 20% / 线损过大
+VOLT_FAIL = 10.2         # 低于此值：舵机会反复复位，读数不可信
 TEMP_WARN = 60.0         # ℃
 TEMP_FAIL = 75.0         # ℃
-LATENCY_WARN_MS = 80.0   # 单次查询超过这个值，总线可能有问题
+#: 真实 ping 往返（ms）。1 Mbaud 下一帧 6 字节，正常 1~5 ms。
+#: 这个值**必须自己计时**才能拿到 —— SDK 的 query/ping 会死等满 100 ms，
+#: 用它算出来永远是 100 ms（见 timed_ping 的注释）。
+LATENCY_WARN_MS = 20.0
+LATENCY_FAIL_MS = 60.0   # 超过这个基本等于链路要断了
+PING_WINDOW_MS = 80.0    # 等响应的窗口，超过判为没响应
 
 #: 端口与波特率（robo_driver 用 1000000，官方例程写 115200，两个都试）
 DEFAULT_PORT = "/dev/ttyUSB0"
@@ -222,6 +237,64 @@ def open_bus(port, baud=None, probe_timeout=0.2):
     return None, None, None, log
 
 
+def timed_ping(mgr, sid, window_ms=None):
+    """精确测一次 ping 往返（ms）。没响应返回 None。
+
+    为什么不用 mgr.ping()
+        它的实现是 `update(wait_response=True)`，而 update 的循环是
+        "没有新数据就继续转，直到 timeout"——**没有提前 break**。
+        默认 timeout=0.1，所以无论舵机多快，测出来永远是 100 ms。
+        2026-11-02 真机跑出来 7 个全是 100 ms，就是踩的这个。
+
+        这里自己发帧、自己轮询，收到响应立刻返回，测的才是真实往返。
+
+    内部结构（pkt_buffer / CODE_PING）来自 SDK 的公开属性；万一哪天 SDK 改了，
+    由调用方捕获异常回退到 SDK 的 ping。
+    """
+    import struct
+    import fashionstar_uart_sdk as uservo
+
+    if window_ms is None:
+        window_ms = PING_WINDOW_MS
+
+    # 清掉上一次的残留，否则可能读到别的舵机的帧而误判
+    try:
+        mgr.uart.reset_input_buffer()
+    except Exception:                                 # noqa: BLE001
+        pass
+    try:
+        mgr.pkt_buffer.empty_buffer()
+    except Exception:                                 # noqa: BLE001
+        pass
+
+    mgr.send_request(mgr.CODE_PING, struct.pack("<B", sid))
+
+    t0 = time.perf_counter()
+    deadline = t0 + window_ms / 1000.0
+    while time.perf_counter() < deadline:
+        n = mgr.uart.in_waiting
+        if n:
+            data = mgr.uart.read(n)
+            for b in data:
+                mgr.pkt_buffer.update(bytes([b]))
+            while mgr.pkt_buffer.has_valid_packet():
+                pkt = mgr.pkt_buffer.get_packet()
+                res = uservo.Packet.unpack(pkt)
+                if not res:
+                    continue
+                code, param = res
+                # 只认这个 ID 的 PING 响应；残留帧的 code/param 对不上
+                if code == mgr.CODE_PING and param and param[0] == sid:
+                    elapsed = (time.perf_counter() - t0) * 1000.0
+                    try:
+                        mgr.response_ping(param)
+                    except Exception:                 # noqa: BLE001
+                        pass
+                    return elapsed
+        time.sleep(0.0005)        # 0.5 ms 轮询，1 Mbaud 下一帧约 0.06 ms
+    return None
+
+
 def read_one(mgr, sid, samples=1, ping_only=False):
     """读一个舵机的完整状态，多次采样。
 
@@ -233,47 +306,70 @@ def read_one(mgr, sid, samples=1, ping_only=False):
     # 先 ping：它和"读角度失败"是两件事，要分开。
     # ping 通但角度读不到 = 数据链路异常（线质量/干扰）；
     # ping 不通 = 压根没这个舵机（ID 错 / 没上电 / 掉线）。
-    t0 = time.time()
     try:
-        ping_ok = bool(mgr.ping(sid))
+        ping_ms = timed_ping(mgr, sid)
     except Exception:                                 # noqa: BLE001
-        ping_ok = False
-    ping_ms = (time.time() - t0) * 1000
+        # SDK 内部结构变了，退回它的 ping。
+        # 注意写法：不能写成 `elapsed if mgr.ping() else None` —— 条件表达式
+        # 先求条件，这样时间是 ping 返回之后才开始算的，永远是 0。
+        t0 = time.perf_counter()
+        try:
+            ok = bool(mgr.ping(sid))
+        except Exception:                             # noqa: BLE001
+            ok = False
+        ping_ms = (time.perf_counter() - t0) * 1000.0 if ok else None
+    ping_ok = ping_ms is not None
+
+    # 多 ping 几次取最大，偶发高延迟比中位数更能说明接触不良
+    ping_max = ping_ms
+    if ping_ok and not ping_only:
+        for _ in range(min(2, max(0, samples - 1))):
+            try:
+                extra = timed_ping(mgr, sid)
+            except Exception:                         # noqa: BLE001
+                break
+            if extra is not None and (ping_max is None or extra > ping_max):
+                ping_max = extra
+            time.sleep(0.005)
 
     if ping_only or not ping_ok:
         return {
             "id": sid, "online": ping_ok, "ping_ok": ping_ok,
             "angle": None, "mturn": None, "volt": None, "temp": None,
-            "status": None, "latency_ms": ping_ms if ping_ok else None,
+            "status": None,
+            "latency_ms": ping_ms, "latency_max_ms": ping_max,
             "fails": 0 if ping_ok else max(1, samples),
             "samples": max(1, samples), "jitter": 0.0,
         }
 
     for i in range(max(1, samples)):
-        t0 = time.time()
+        t0 = time.perf_counter()
         try:
             a = mgr.query_servo_angle(sid)
         except Exception:                             # noqa: BLE001
             a = None
-        dt = (time.time() - t0) * 1000
+        dt = (time.perf_counter() - t0) * 1000
         if a is None:
             fails += 1
         else:
             angles.append(float(a))
             lat.append(dt)
 
-        for bucket, fn in ((mturns, mgr.query_servo_mturn_angle),
-                           (volts, mgr.query_voltage),
-                           (temps, mgr.query_temperature),
-                           (status, mgr.query_status)):
-            try:
-                v = fn(sid)
-                if v is not None:
-                    bucket.append(float(v))
-            except Exception:                         # noqa: BLE001
-                pass
+        # 电压/温度/状态/多圈角变化慢，只读第一轮。
+        # SDK 每个查询固定等 100 ms（见 timed_ping 注释），少读一次省 0.1 s。
+        if i == 0:
+            for bucket, fn in ((mturns, mgr.query_servo_mturn_angle),
+                               (volts, mgr.query_voltage),
+                               (temps, mgr.query_temperature),
+                               (status, mgr.query_status)):
+                try:
+                    v = fn(sid)
+                    if v is not None:
+                        bucket.append(float(v))
+                except Exception:                     # noqa: BLE001
+                    pass
         if i < samples - 1:
-            time.sleep(0.02)
+            time.sleep(0.01)
 
     med = lambda xs: statistics.median(xs) if xs else None   # noqa: E731
     return {
@@ -286,6 +382,7 @@ def read_one(mgr, sid, samples=1, ping_only=False):
         "temp": med(temps),
         "status": med(status),
         "latency_ms": med(lat),
+        "latency_max_ms": ping_max,
         "fails": fails,
         "samples": max(1, samples),
         # 角度抖动：静止时应该很小，大说明读数不稳或舵机在抖
@@ -339,9 +436,14 @@ def judge(row):
         up(WARN)
         issues.append("%d/%d 次读失败（丢包）" % (row["fails"], row["samples"]))
 
-    if row["latency_ms"] is not None and row["latency_ms"] > LATENCY_WARN_MS:
-        up(WARN)
-        issues.append("响应 %.0f ms，偏慢" % row["latency_ms"])
+    lat = row.get("latency_max_ms") or row.get("latency_ms")
+    if lat is not None:
+        if lat > LATENCY_FAIL_MS:
+            up(FAIL)
+            issues.append("ping 往返 %.0f ms，链路快断了（正常 1~5 ms）" % lat)
+        elif lat > LATENCY_WARN_MS:
+            up(WARN)
+            issues.append("ping 往返 %.0f ms，偏慢（正常 1~5 ms）" % lat)
 
     if row["jitter"] > 1.0:
         up(WARN)
@@ -391,7 +493,7 @@ def fmt(v, width=8, prec=2, suffix=""):
 
 
 def print_table(rows, levels):
-    print("\n  ID  关节           角度(°)   多圈角(°)   电压(V)  温度(℃)  响应(ms)  判定")
+    print("\n  ID  关节           角度(°)   多圈角(°)   电压(V)  温度(℃)  ping(ms)  判定")
     print("  " + "-" * 82)
     mark = {OK: "✓", WARN: "⚠", FAIL: "✗"}
     for r in rows:
@@ -401,7 +503,7 @@ def print_table(rows, levels):
               % (sid, JOINT_NAMES[sid],
                  fmt(r["angle"], 8, 2), fmt(r["mturn"], 10, 1),
                  fmt(r["volt"], 8, 2), fmt(r["temp"], 8, 1),
-                 fmt(r["latency_ms"], 8, 0), tag))
+                 fmt(r.get("latency_max_ms") or r["latency_ms"], 8, 1), tag))
 
     # 夹爪单独给一行换算值 —— 角度对夹爪没意义，开度才有
     g = rows[6]
@@ -418,20 +520,21 @@ def print_table(rows, levels):
 def mock_rows():
     """造一组假数据，用来验证判据和输出（不需要硬件）。"""
     base = [
-        # id, angle, mturn, volt, temp, latency, fails, jitter
-        (0, 0.4, 12.5, 7.42, 31.0, 8.0, 0, 0.05),
-        (1, -0.3, -240.0, 7.42, 34.0, 9.0, 0, 0.08),
-        (2, 0.1, 88.0, 7.42, 36.0, 7.0, 0, 0.03),
-        (3, 359.8, -120.0, 7.42, 33.0, 8.0, 1, 0.60),
-        (4, 0.2, 7.0, 7.42, 30.0, 8.0, 0, 0.04),
-        (5, 0.9, -15.0, 7.42, 32.0, 9.0, 0, 0.06),
-        (6, 50.0, 3.0, 7.42, 29.0, 8.0, 0, 0.10),
+        # id, angle, mturn, volt, temp, ping_ms, fails, jitter
+        # 电压按本机实测的 12 V 系统（幻尔 RX8/RA8）
+        (0, 0.4, 12.5, 12.04, 27.1, 1.8, 0, 0.05),
+        (1, -90.5, -90.5, 12.24, 26.8, 1.6, 0, 0.08),
+        (2, 89.5, 89.5, 11.98, 26.2, 2.0, 0, 0.03),
+        (3, 2.3, 2.3, 11.82, 28.1, 14.0, 1, 0.60),
+        (4, 32.2, 32.2, 11.93, 27.8, 1.9, 0, 0.04),
+        (5, 0.2, 0.3, 11.85, 27.3, 2.2, 0, 0.06),
+        (6, 88.9, 88.9, 11.82, 28.2, 1.7, 0, 0.10),
     ]
     rows = []
     for (sid, a, m, v, t, lat, f, j) in base:
         rows.append({"id": sid, "online": True, "ping_ok": True,
                      "angle": a, "mturn": m, "volt": v, "temp": t,
-                     "status": 0, "latency_ms": lat,
+                     "status": 0, "latency_ms": lat, "latency_max_ms": lat,
                      "fails": f, "samples": 3, "jitter": j})
     return rows
 
@@ -521,6 +624,9 @@ def run(args):
 
     online = [r["id"] for r in rows if r["online"]]
     missing = [i for i in SERVO_IDS if i not in online]
+
+    print("\n  角度是舵机原始读数（未扣零位偏移），臂停在任意姿态都正常 ——")
+    print("  \"在不在零位\"是 zero_calib.py 的判据，不是这里要判的。")
 
     print("\n" + "─" * 62)
     print("  在线：%d/%d %s" % (len(online), len(SERVO_IDS),
