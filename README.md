@@ -64,6 +64,9 @@ DEFAULT_ACC_TIME / DEC_TIME = 50 ms    ← 脑控场景应显式放长
 **卡尺实测**：舵机 100° = 张开 **65 mm**，21.9° = 合到底 **8 mm**（行程 57 mm）。
 可用角 21.9°~100°，发 0° 会算出 −0.032 m 超 URDF 下限，把整机状态判为非法、规划全瘫。
 
+**通信是否健康**用 `python3 scripts/servo_check.py` 一次查完（只读不驱动）：
+设备/权限/占用 → 波特率 → 7 个 ID 在线与丢包 → 电压/温度 → 夹爪开度。
+
 ## 会咬人的环境约束
 
 1. **仓库路径必须纯 ASCII**。`rosidl_generate_interfaces` 在 `通` 字处截断，`colcon build` 必失败。
@@ -117,6 +120,7 @@ DEFAULT_ACC_TIME / DEC_TIME = 50 ms    ← 脑控场景应显式放长
 ssvep-Roarm/
 ├── scripts/
 │   ├── robot_up.sh          真机一键启动（driver → move_group → 执行节点）
+│   ├── servo_check.py       7 舵机串口检查（设备/链路/总线/供电，只读）
 │   ├── roarm_cli.py         单条指令：home/pose/grip/grip_deg/list/where
 │   ├── go_zero.py           无力矩逐步逼近（--preset park --fast 收纳）
 │   ├── zero_calib.py        只读零位标定
@@ -161,6 +165,14 @@ bash scripts/run_task.sh --n 5
 # 只取物 / 只放置
 ros2 run roarm_task task --scene data/scene_real.yaml --phase pick
 ros2 run roarm_task task --scene data/scene_real.yaml --phase place
+```
+
+**臂不动、读数不对、或换了一台机器时，先跑这个**（机械臂要停掉，驱动会独占串口）：
+
+```bash
+python3 scripts/servo_check.py              # 完整检查，约 3 秒
+python3 scripts/servo_check.py --ping-only  # 只测 7 个 ID 在不在线
+python3 scripts/servo_check.py --mock       # 没有硬件时验证输出与判据
 ```
 
 ## 下一步
