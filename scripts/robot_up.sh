@@ -211,6 +211,23 @@ start_all() {
   echo "$node_pid" >> "$PIDFILE"
   wait_for_log "$NODELOG" "ArmMoveitControl ready" 20 "arm_moveit_write" || { stop_all; exit 1; }
 
+  # ---- 5) 自动回零（一条命令就到位，不用再手敲第二条）
+  # 走 MoveIt 规划，速度受上面的 velocity_scaling 控制；
+  # 不是驱动里那种"1.5 秒甩到 0°"（那是 2026-11-02 摔臂的原因）。
+  # 不想回零：AUTO_HOME=false bash scripts/robot_up.sh
+  local auto_home="${AUTO_HOME:-true}"
+  if [ "$auto_home" = "true" ]; then
+    msg "自动回零（MoveIt 规划，约 10~30 s；AUTO_HOME=false 跳过）…"
+    if $PY "$SCRIPT_DIR/roarm_cli.py" home --wait 60 --tol 25; then
+      ok "已回零"
+    else
+      warn "回零没成功，臂仍停在原处。手动重试："
+      msg "  ${DIM}$PY $SCRIPT_DIR/roarm_cli.py home --wait 60 --tol 25${RST}"
+    fi
+  else
+    msg "AUTO_HOME=false：跳过回零，臂停在当前姿态（已上力矩）"
+  fi
+
   msg ""
   msg "当前 shell 先加载工作区："
   msg "  ${DIM}source $WS/install/setup.bash${RST}"

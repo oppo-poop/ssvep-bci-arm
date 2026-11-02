@@ -161,12 +161,10 @@ ros2 run roarm_task task --dry-run
 
 # 真机（先确认工作区无人无障碍）
 bash scripts/robot_up.sh
-# ↑ 启动只"上力矩保持当前姿态"，不会动。
-#   要回零必须显式发命令（MoveIt 规划，速度受 velocity_scaling 控制）：
-python3 scripts/roarm_cli.py home --wait 30 --tol 25
+# ↑ 一条命令到位：起服务 → 自动回零（MoveIt 规划，慢速、可控）
 
-# 想恢复"一启动就驱零位"（旧行为，臂会大幅运动）：
-# ZERO_ON_START=true bash scripts/robot_up.sh
+# 只想上力矩、不回零（比如要先摆到别处）：
+# AUTO_HOME=false bash scripts/robot_up.sh
 
 # 完整取放（连跑 5 次，日志进 data/runs/）
 bash scripts/run_task.sh --n 5
