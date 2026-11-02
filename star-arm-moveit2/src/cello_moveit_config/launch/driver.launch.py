@@ -2,36 +2,37 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration
 from launch.actions import DeclareLaunchArgument
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    # 启动时是否驱到零位。默认 false —— 只保持当前姿态，不做任何运动。
+    # 启动时是否驱到零位。默认 true —— 一条命令就到位，不必再补一条 home。
     #
-    # 为什么改了这个默认值
-    #   原来 driver 一启动就 arm_move_by_time() 驱到零位，interval 固定 1.5 s。
-    #   臂若停在折叠态（j2/j3 各差 90°），等于 1.5 秒内满速展开整臂；
-    #   2026-11-02 展开到一半整臂失力摔了一次。
+    # 2026-11-02 的调整
+    #   原来 interval 固定 1500 ms，臂停折叠态（j2/j3 各差 90°）时等于
+    #   1.5 秒满速展开，上升到一半失力回落。现在驱动侧改成 3000 ms，
+    #   加速段拉平、冲击电流小一半。
     #
-    # 需要回零怎么办
-    #   用 scripts/roarm_cli.py home —— 那是 MoveIt 规划的路径，速度受
-    #   velocity_scaling 控制，比"上电就冲"安全得多。
-    #   task 流程也会自己先回位（sequence 第一步就是 go_home）。
-    #
-    # 想恢复旧行为：给 driver.launch.py 传 zero_on_start:=true，
-    # 或用 robot_up.sh 的 ZERO_ON_START=true。
+    # 想上电完全不动（比如臂停在很奇怪的位置，想先人工摆好）
+    #   zero_on_start:=false  → 只上力矩、保持当前姿态；
+    #   回零再走 scripts/roarm_cli.py home（MoveIt 规划，更慢但更稳）。
     zero_on_start = LaunchConfiguration("zero_on_start")
 
     return LaunchDescription(
         [
             DeclareLaunchArgument(
-                "zero_on_start", default_value="false",
-                description="启动时是否驱到零位（true=旧行为，臂会大幅运动）"),
+                "zero_on_start", default_value="true",
+                description="启动时是否驱到零位（3 s 慢速；false=只上力矩保持原姿态）"),
             Node(
                 package="robo_driver",
                 executable="driver",
                 name="cello_driver",
                 output="screen",
-                parameters=[{"zero_on_start": zero_on_start}],
+                # 显式声明类型：LaunchConfiguration 求值出来是字符串，
+                # 而节点把 zero_on_start 声明成 bool。不指定 value_type 时
+                # 依赖 launch_ros 的隐式 yaml 解析，换版本可能就 TypeMismatch。
+                parameters=[{"zero_on_start": ParameterValue(
+                    zero_on_start, value_type=bool)}],
             ),
             Node(
                 package="cello_controller",

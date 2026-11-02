@@ -110,7 +110,7 @@ DEFAULT_ACC_TIME / DEC_TIME = 50 ms    ← 脑控场景应显式放长
 | `task --phase place` 不检查手上有没有东西 | 已加前置检查：开口 ≤9.5 mm（合到底）或 ≥64 mm（全开）都判"没东西"，拒绝执行；`--no-grasp-check` 可跳过 |
 | joint6 限速 13.14→3.14 / 加速度限值打开 | 见 `star-arm-moveit2` 的 commit |
 | `sensors_3d` 非空导致 move_group 静默死 | 置为 `[]`；IK 超时 0.005→0.05 s；零位偏移补偿 |
-| **`robo_driver` 上电无条件驱零位** | 原来每次启动都在 1.5 s 内把所有关节拉到 0°。臂停在折叠态时（j2/j3 各差 90°）等于满速展开整臂，**2026-11-02 因此整臂失力摔落**。现在默认只"保持当前姿态"（`zero_on_start=false`），回零改用 `roarm_cli.py home` 走 MoveIt 规划 |
+| **`robo_driver` 启动驱零位太快** | 原来固定 1.5 s 拉所有关节到 0°。臂停在折叠态时（j2/j3 各差 90°）等于满速展开，**2026-11-02 上升到一半失力回落**。时长改为 **3 s**（加速段拉平、冲击电流减半），保留"一条命令就到位"；`ZERO_ON_START=false` 可改为只上力矩 |
 
 **未修**
 
@@ -161,10 +161,10 @@ ros2 run roarm_task task --dry-run
 
 # 真机（先确认工作区无人无障碍）
 bash scripts/robot_up.sh
-# ↑ 一条命令到位：起服务 → 自动回零（MoveIt 规划，慢速、可控）
+# ↑ 一条命令到位：driver 启动后用 3 秒把臂慢慢驱到零位
 
-# 只想上力矩、不回零（比如要先摆到别处）：
-# AUTO_HOME=false bash scripts/robot_up.sh
+# 上电完全不动（臂停在很奇怪的位置、想先人工摆好）：
+# ZERO_ON_START=false bash scripts/robot_up.sh
 
 # 完整取放（连跑 5 次，日志进 data/runs/）
 bash scripts/run_task.sh --n 5

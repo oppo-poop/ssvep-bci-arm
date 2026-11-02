@@ -136,9 +136,8 @@ status() {
 
 start_all() {
   msg "${YEL}即将启动真机。${RST}"
-  msg "  · driver 启动只上力矩、不会动"
-  msg "  · 最后一步会自动回零（MoveIt 慢速规划），臂会从这里运动到 home"
-  msg "  · 不想回零：AUTO_HOME=false bash scripts/robot_up.sh"
+  msg "  · driver 启动后会把臂慢速驱到零位（约 3 秒），臂会动"
+  msg "  · 臂停在大幅展开的位置时先托住，或改用：ZERO_ON_START=false bash scripts/robot_up.sh"
   msg "周围无人、电源开关在手边。"
   printf '继续？[y/N] '
   read -r ans
@@ -156,11 +155,10 @@ start_all() {
   : > "$PIDFILE"
 
   # ---- 1) driver（robo_driver + cello_controller）
-  # ZERO_ON_START=false（默认）：只上力矩保持当前姿态，不动。
-  #   从前驱动一启动就驱零位、1.5 s 内完成；臂若停在折叠态（j2/j3 各差 90°）
-  #   等于满速展开整臂，2026-11-02 就这么摔过一次。
-  # 需要回零：python3 scripts/roarm_cli.py home（MoveIt 规划，速度可控）
-  local zero_start="${ZERO_ON_START:-false}"
+  # ZERO_ON_START=true（默认）：驱动在 3 s 内把臂驱到零位 —— 一条命令就到位。
+  #   历史：原来 1.5 s，折叠态展开 90° 太猛，2026-11-02 上升到一半失力回落。
+  # ZERO_ON_START=false：只上力矩保持原姿态，之后由本脚本用 MoveIt 慢速回零。
+  local zero_start="${ZERO_ON_START:-true}"
   msg "启动 driver…（zero_on_start=${zero_start}）"
   setsid ros2 launch cello_moveit_config driver.launch.py \
     zero_on_start:="$zero_start" > "$DRVLOG" 2>&1 &
@@ -219,7 +217,9 @@ start_all() {
   # 走 MoveIt 规划，速度受上面的 velocity_scaling 控制；
   # 不是驱动里那种"1.5 秒甩到 0°"（那是 2026-11-02 摔臂的原因）。
   # 不想回零：AUTO_HOME=false bash scripts/robot_up.sh
-  local auto_home="${AUTO_HOME:-true}"
+  # 驱动已经把臂驱到零位了，就别再用 MoveIt 回一次（那条路径要 1~2 分钟）。
+  # 只有 zero_on_start=false（驱动不动）时，才由这里补一次慢速回零。
+  local auto_home="${AUTO_HOME:-$([ "$zero_start" = "true" ] && echo false || echo true)}"
   if [ "$auto_home" = "true" ]; then
     msg "自动回零（MoveIt 规划；AUTO_HOME=false 跳过）…"
     # 180 s 不是随手写的：从折叠态（j2/j3 各差 90°）展开到 home 是大行程，

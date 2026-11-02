@@ -136,10 +136,10 @@ class Arm_contorl(Node):
         self.declare_parameter("robo_type", "robo")
 
         self.declare_parameter('lock', 'enable')
-        #: 启动时是否驱到零位。默认 False —— 上电只"保持当前姿态"。
-        #: 原因见 hold_current_pose() 的注释：2026-11-02 从折叠态启动，
-        #: 1.5 s 内要转 90°，展开到一半整臂失力摔了。
-        self.declare_parameter('zero_on_start', False)
+        #: 启动时是否驱到零位。默认 True —— 一条命令就到位，不用再补一条 home。
+        #: 2026-11-02 从折叠态启动时 1.5 s 展开 90° 失力回落后，把时长改成 3 s。
+        #: 想上电完全不动：zero_on_start:=false（或 ZERO_ON_START=false）。
+        self.declare_parameter('zero_on_start', True)
 
         self.robo_type = (self.get_parameter("robo_type").get_parameter_value().string_value)
         self.lock = (self.get_parameter("lock").get_parameter_value().string_value)
@@ -152,7 +152,10 @@ class Arm_contorl(Node):
             raise
         self.target_angle = self.Servo.ZERO_ANGLE
         # self.target_angle 初始目标角度列表 / initial target angle list
-        self.interval = [1500 for _ in range(self.Servo.SRV_NUM)]
+        #: 启动驱零位用的时间。原来 1500 ms —— 折叠态展开 90° 时太猛，
+        #: 2026-11-02 上升到一半失力回落。改 3000 ms，加速段拉平、冲击电流小一半。
+        #: 只影响启动这一次；之后每条运动命令都会用自己的 time（见 set_angle_callback）。
+        self.interval = [3000 for _ in range(self.Servo.SRV_NUM)]
         self.current_angle = [0.0 for _ in range(self.Servo.SRV_NUM)]
         if self.lock == "enable":
             if self.zero_on_start:
