@@ -110,12 +110,12 @@ DEFAULT_ACC_TIME / DEC_TIME = 50 ms    ← 脑控场景应显式放长
 | `task --phase place` 不检查手上有没有东西 | 已加前置检查：开口 ≤9.5 mm（合到底）或 ≥64 mm（全开）都判"没东西"，拒绝执行；`--no-grasp-check` 可跳过 |
 | joint6 限速 13.14→3.14 / 加速度限值打开 | 见 `star-arm-moveit2` 的 commit |
 | `sensors_3d` 非空导致 move_group 静默死 | 置为 `[]`；IK 超时 0.005→0.05 s；零位偏移补偿 |
+| **`robo_driver` 上电无条件驱零位** | 原来每次启动都在 1.5 s 内把所有关节拉到 0°。臂停在折叠态时（j2/j3 各差 90°）等于满速展开整臂，**2026-11-02 因此整臂失力摔落**。现在默认只"保持当前姿态"（`zero_on_start=false`），回零改用 `roarm_cli.py home` 走 MoveIt 规划 |
 
 **未修**
 
 | 问题 | 后果 |
 |---|---|
-| `robo_driver` 上电无条件 `reset_multi_turn_angle` + 驱到零位 | 启动瞬间断电 50 ms，臂会掉一点 |
 | 舵机型号表缺 `ra8-u26`，LeRobot 全声明为 `rx8-u50` | 若用型号握手校验，真机可能报错 |
 
 ## 目录
@@ -161,7 +161,12 @@ ros2 run roarm_task task --dry-run
 
 # 真机（先确认工作区无人无障碍）
 bash scripts/robot_up.sh
+# ↑ 启动只"上力矩保持当前姿态"，不会动。
+#   要回零必须显式发命令（MoveIt 规划，速度受 velocity_scaling 控制）：
 python3 scripts/roarm_cli.py home --wait 30 --tol 25
+
+# 想恢复"一启动就驱零位"（旧行为，臂会大幅运动）：
+# ZERO_ON_START=true bash scripts/robot_up.sh
 
 # 完整取放（连跑 5 次，日志进 data/runs/）
 bash scripts/run_task.sh --n 5
