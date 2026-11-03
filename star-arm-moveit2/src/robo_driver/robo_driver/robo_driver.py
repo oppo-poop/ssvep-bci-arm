@@ -86,7 +86,12 @@ class uservo_ex:
         # 启动时驱到的位置 = URDF 零位对应的舵机角度，而不是舵机 0°。
         # 单位是 0.1°（target_angle 的格式）；offset 全 0 时与旧行为完全一致。
         self.ZERO_ANGLE = [int(10 * o) for o in self.ZERO_OFFSET_DEG]
-        self.ZERO_ANGLE.append(500)   # 夹爪：50°（半开），不参与零位标定
+        # 夹爪启动位，单位 0.1°。**不参与零位标定**，只是给一个"半开"的落点。
+        # 旧值是 500（50°），旧爪 21.9°~100° 时对应约 28 mm 开度。
+        # 2026-11-03 拆装后新范围是 86.7°（闭合）~174.8°（张开），
+        # **50° 已经低于闭合角，启动时会硬顶 36.7° → 堵转发热。**
+        # 取 1210（121°）≈ 27.8 mm，和旧爪的"半开 28 mm"物理上一致。
+        self.ZERO_ANGLE.append(1210)
         self.reset_multi_turn_angle(0xff)
         time.sleep(0.1)
 

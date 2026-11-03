@@ -66,7 +66,7 @@ LIFT_M = 0.10
 #:
 #:   舵机 100° -> joint7_left  0.000 -> 两指**张开**（约 50 mm）   ← CLI "open"
 #:   舵机 50°  -> joint7_left -0.016 -> 两指半开（约 32 mm）       ← driver 启动位
-#:   舵机 21.9°-> joint7_left -0.025 -> 两指**合拢**（0 mm）       ← CLI "close"
+#:   舵机 86.7°-> joint7_left -0.025 -> 两指**合拢**（4 mm）       ← CLI "close"
 #:
 #: 所以 CLI 的 open/close 现在**是自然语义**（open=张开、close=合拢），
 #: 不再是 10-17 记录的"名字相反"。下面这张表因此变成恒等映射。

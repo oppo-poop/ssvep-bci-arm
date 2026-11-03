@@ -140,19 +140,17 @@ private:
     msg.servo_id = {6};
     msg.time = {1000}; 
 
-    // ⚠ 角度换算：joint7_left = (deg - 100) / 100 * 0.032
-    //   deg=100 ->  0.000 m  两指合拢（0 mm 间隙），正好是 URDF 上限 upper=0
-    //   deg= 50 -> -0.016 m  半开（约 32 mm）
-    //   deg= 21.9 -> -0.025 m  完全张开（50 mm），正好是 URDF 下限 lower=-0.025
+    // ⚠ joint7_left 的换算在 robo_driver.servoangle2jointstate 里，当前是
+    //   (deg - 174.8) * 0.025/88.1，所以 86.7° -> -0.025、174.8° -> 0.000。
     //
-    // 原来 else 分支发 0.0°，算出 -0.032 m，**超出 URDF 下限 28%**。
-    // 夹爪一旦超限，MoveIt 的 planning scene 就把整个机器人状态判为 invalid，
-    // OMPL 报 "Skipping invalid start state"，之后所有规划全部失败——
-    // 表现为"发任何目标都不动"，且与目标点无关。
+    // ⚠ 别让 joint7 超出 URDF 的 [-0.025, 0]：一旦超限，MoveIt 的 planning scene
+    //   会把整个机器人状态判为 invalid，OMPL 报 "Skipping invalid start state"，
+    //   之后所有规划全部失败 —— 表现为"发任何目标都不动"，且与目标点无关。
+    //   （历史事故：else 分支曾发 0.0°，算出 -0.032 m，超下限 28%）
     //
     // 注意命令名与物理动作相反（历史遗留，调用方用 GRIP_CMD 表映射）：
-    //   "open"  -> 100°  -> 物理闭合
-    //   "close" -> 21.9° -> 物理张开
+    //   "open"  -> kServoClosed(174.8°) -> 物理张开 65 mm
+    //   "close" -> kServoOpened( 86.7°) -> 物理闭合 4 mm
     // 2026-11-03 夹爪拆装后零位偏移，卸力手推实测两端：
     //   舵机  86.7° → 两指完全闭合（joint7_left = -0.025，两指 4 mm）
     //   舵机 174.8° → 两指完全张开（joint7_left =  0.000，两指 65 mm）

@@ -126,7 +126,7 @@ def grip(semantic: str, action: Optional[str] = None) -> Result:
 
 
 def grip_deg(deg: float, action: str = "grip_deg") -> Result:
-    """把夹爪开到指定舵机角度（21.9~100）。
+    """把夹爪开到指定舵机角度（实测 86.7°=闭合 4mm ~ 174.8°=张开 65mm）。
 
     `GripperCommand.msg` 只有 string，做不到连续开度；这条走 set_angle_topic。
 

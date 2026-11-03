@@ -44,12 +44,12 @@ SCENE_OUT = ROOT / "data" / "scene_real.yaml"
 SPEED_MM_S = 3.0
 #: 夹爪舵机角与物理开合的关系。**2026-10-18 实物实测，与之前仿真的推算相反**：
 #:   舵机 100° → joint7_left =  0.000 → 两指**张开**（约 50 mm）
-#:   舵机 21.9° → joint7_left = -0.025 → 两指**合拢**（0 mm）
-#: 21.9° 是 URDF 下限对应的角度，再小就超限（超限会让 MoveIt 判整机状态非法）。
+#:   舵机 86.7° → joint7_left = -0.025 → 两指**合拢**（4 mm）
+#: 86.7° 是 URDF 下限对应的角度，再小就超限（超限会让 MoveIt 判整机状态非法）。
 #: 2026-11-03 夹爪拆装后重标（卸力手推实测）：闭合 86.7°、全开 174.8°。
 #: 旧值 21.9°/100° 会把舵机顶死 —— 零位偏移了约 65°。
 GRIP_CLOSED_DEG, GRIP_OPEN_DEG = 86.7, 174.8
-#: 2026-10-18 卡尺实测：舵机 21.9° -> 8 mm，100° -> 65 mm
+#: 2026-11-03 拆装后手推实测：舵机 86.7° -> 4 mm，174.8° -> 65 mm
 GAP_MIN_MM, GAP_MAX_MM = 8.0, 65.0
 MAX_STEP_MM = 50.0
 
@@ -397,7 +397,7 @@ def main():
             except ValueError:
                 print("  数值不对")
                 continue
-            # 连续开度：0 = 合拢（舵机 21.9°），1 = 全开（舵机 100°），线性插值。
+            # 连续开度：0 = 合拢（GRIP_CLOSED_DEG），1 = 全开（GRIP_OPEN_DEG）。
             # GripperCommand 只有一个字符串，做不到半开，所以直接发 set_angle_topic。
             deg = GRIP_CLOSED_DEG + frac * (GRIP_OPEN_DEG - GRIP_CLOSED_DEG)
             mm = GAP_MIN_MM + frac * (GAP_MAX_MM - GAP_MIN_MM)
