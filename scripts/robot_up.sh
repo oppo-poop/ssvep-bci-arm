@@ -2,7 +2,7 @@
 # 真机一键启动：driver + move_group/rviz + 执行节点
 #
 #   bash scripts/robot_up.sh            # 启动（会先确认，默认无 RViz）
-#   VELOCITY=0.15 ACCELERATION=0.30 bash scripts/robot_up.sh   # 约 3 倍速
+#   VELOCITY=0.15 ACCELERATION=0.30 bash scripts/robot_up.sh   # 约 1.5 倍速（默认 0.10）
 #   RVIZ=true bash scripts/robot_up.sh  # 带 RViz（需要可用的 X/GLX）
 #   bash scripts/robot_up.sh --status   # 看各节点状态
 #   bash scripts/robot_up.sh --stop     # 全部停掉
@@ -201,10 +201,13 @@ start_all() {
   echo "$demo_pid" >> "$PIDFILE"
   wait_for_log "$DEMOLOG" "You can start planning" 45 "move_group" || { stop_all; exit 1; }
 
-  # ---- 4) 执行节点。默认 0.10 / 0.20（约 6 mm/s）；
-  #         要更稳用 VELOCITY=0.05 ACCELERATION=0.10（约 3 mm/s），
-  #         示教/粗定位用 VELOCITY=0.15 ACCELERATION=0.30（约 9 mm/s）
-  local vel="${VELOCITY:-0.05}"
+  # ---- 4) 执行节点。默认 VELOCITY=0.10（约 6 mm/s，是旧值 0.05 的 2 倍），
+  #         与 joint_limits.yaml 的 default_velocity_scaling_factor 一致。
+  #         要更稳：VELOCITY=0.05（约 3 mm/s）
+  #         示教/粗定位：VELOCITY=0.15 ACCELERATION=0.30（约 9 mm/s）
+  #         acceleration 默认 -1.0 = 交给 MoveIt 用 joint_limits.yaml 的值。
+  # ⚠ 提速前先确认抖动已修好（cello_controller 已改整段单命令），快了更抖。
+  local vel="${VELOCITY:-0.10}"
   local acc="${ACCELERATION:--1.0}"
   msg "启动执行节点（velocity_scaling=$vel, acceleration_scaling=$acc）…"
   setsid ros2 launch cello_moveit_config arm_moveit_write.launch.py \
@@ -223,7 +226,7 @@ start_all() {
   if [ "$auto_home" = "true" ]; then
     msg "自动回零（MoveIt 规划；AUTO_HOME=false 跳过）…"
     # 180 s 不是随手写的：从折叠态（j2/j3 各差 90°）展开到 home 是大行程，
-    # velocity_scaling=0.05 下要 1~2 分钟。原来给 60 s 会在半路报"未到位"，
+    # velocity_scaling=0.05~0.10 下要 0.5~2 分钟。原来给 60 s 会在半路报"未到位"，
     # 而 --wait 超时**不会让轨迹停下**，臂还在走 —— 后面紧接着发命令就会打架。
     if $PY "$SCRIPT_DIR/roarm_cli.py" home --wait 180 --tol 25; then
       ok "已回零"

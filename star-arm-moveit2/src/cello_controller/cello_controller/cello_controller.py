@@ -2,6 +2,7 @@ import rclpy
 from rclpy.action import ActionServer, CancelResponse  # 动作服务器与取消响应 / Action server & cancel response
 from rclpy.node import Node
 import time
+import os
 from std_msgs.msg import Float32MultiArray
 # from uservo.uservo_ex import uservo_ex
 from robo_interfaces.msg import SetAngle  # 舵机角度控制消息 / Servo angle control message
@@ -126,49 +127,107 @@ class RoboActionClient(Node):
             self.current_angle[idx] = jointstate2servoangle(idx, pos)
         self._have_state = True
 
-    def arm_execute_callback(self, goal_handle):
-        """执行轨迹点 / execute trajectory points"""
-        trajectory = goal_handle.request.trajectory
-        # self.get_logger().info(
-        #     f'Receiving trajectory with {len(trajectory.points)} points.')
-        self.last_time = 0
-        # 遍历轨迹点 / iterate through trajectory
-        for pt in trajectory.points:
-            # 计算每段运行时间 / compute run duration
-            tfs = pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
-            duration = max(tfs - self.last_time, 0.1)
-            self.last_time = tfs
-            # 构造 SetAngle 消息 / build SetAngle msg
-            msg = SetAngle(
-                servo_id=list(range(6)),
-                target_angle=[0]*6,
-                time=[int(duration*1000)]*6,
-            )
-            # 填充目标角度 / fill target angles
-            for name, angle in zip(trajectory.joint_names, pt.positions):
-                idx = ROBO_TYPE_1_INDEX_JOINT_[name]
-                msg.target_angle[idx] = jointstate2servoangle(idx, angle)
-            self.set_angle_publisher.publish(msg)  # 发布命令 / publish command
+    # ---- 轨迹下发模型（2026-11-03）----
+    # 这类串口总线舵机是「给目标角度 + 给运行时间，自己跑梯形加减速」，
+    # **不是**能实时跟随密集轨迹点的高速伺服。
+    #
+    # 旧逻辑逐点下发，MoveIt 轨迹点通常每 0.05~0.1 s 一个，控制器每点
+    # 只 sleep duration 就发下一条；但 robo_driver.set_angle_callback 会把
+    # 每条命令的 time 固定 +400 ms（interval = time + 400），即一条命令
+    # 至少要 500 ms 才走完。三个现象其实是同一个根因：
+    #   ① 舵机还在加速段就被下一条目标覆盖 -> 速度/方向反复重算 -> **抖动**
+    #   ② 最后一条发出后只等 0.1 s 就 succeed，舵机根本没走完
+    #      -> cli_pose 里「长轨迹会被驱动丢点、停在半路」的真正来源
+    #      （之前一直当玄学，靠 retries 分段逼近绕过去）
+    #   ③ 每条都被打断、到位要重发，体感「速度太慢」
+    #
+    # 新逻辑：整段轨迹合成**一条**命令。目标 = 最后一个点，时长 = 最后一个
+    # 点的 time_from_start（MoveIt 已算好的总时长），并让等待时间与驱动层
+    # interval 对齐（time_ms + 400），舵机走完才返回。
+    #
+    # 代价：中间路径点丢弃，各关节用同一时长线性到位（关节空间直线），
+    # 不再是 MoveIt 规划的曲线。取放每段都是短距离位姿，影响很小；
+    # 若发现需要绕障，ARM_LEGACY_TRAJECTORY=1 回退逐点模式做 A/B 对比。
+    LEGACY = os.environ.get("ARM_LEGACY_TRAJECTORY", "") == "1"
 
-            # 分段等待：原来整段 time.sleep(duration) 期间取消请求只能等到这一步走完
-            # 才可能被看到，实际上永远看不到（execute 结束就 succeed）。
-            deadline = time.time() + duration
-            while time.time() < deadline:
-                if goal_handle.is_cancel_requested:
-                    self._hold_current('exec')
-                    goal_handle.canceled()
-                    self.get_logger().warn('Trajectory canceled by client')
-                    return FollowJointTrajectory.Result()
-                time.sleep(0.01)
+    # robo_driver.set_angle_callback 里 interval = msg.time + 400 ms。
+    # 控制器必须等满这个时长才 succeed，否则舵机没走完就被下一条命令打断。
+    # **这个值必须和驱动层一致** —— scripts/traj_check.py 会从两处源码
+    # 分别抓来比对，改了驱动层却忘了这里，自检会报出来。
+    INTERVAL_PAD_MS = 400
 
-        # 最后一个点之后也要查：取消可能在最后一段等待期间到达
+    def _angles_from_point(self, trajectory, pt, time_ms):
+        """构造一条 SetAngle：目标取该点关节角，6 个关节共用 time_ms。"""
+        msg = SetAngle(
+            servo_id=list(range(6)),
+            target_angle=[0.0] * 6,
+            time=[int(time_ms)] * 6,
+        )
+        for name, angle in zip(trajectory.joint_names, pt.positions):
+            idx = ROBO_TYPE_1_INDEX_JOINT_[name]
+            msg.target_angle[idx] = jointstate2servoangle(idx, angle)
+        return msg
+
+    def _wait_cancelable(self, goal_handle, seconds, tag):
+        """分段等待（对齐舵机执行时间），期间响应取消。返回是否已被取消。"""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if goal_handle.is_cancel_requested:
+                self._hold_current(tag)
+                goal_handle.canceled()
+                self.get_logger().warn('Trajectory canceled by client')
+                return True
+            time.sleep(0.01)
+        return False
+
+    def _canceled_at_end(self, goal_handle):
         if goal_handle.is_cancel_requested:
             self._hold_current('end')
             goal_handle.canceled()
             self.get_logger().warn('Trajectory canceled at end')
+            return True
+        return False
+
+    def arm_execute_callback(self, goal_handle):
+        """执行轨迹。默认整段一条命令；ARM_LEGACY_TRAJECTORY=1 回退逐点。"""
+        trajectory = goal_handle.request.trajectory
+        pts = trajectory.points
+        if not pts:
+            goal_handle.succeed()
             return FollowJointTrajectory.Result()
 
-        # 完成后返回成功 / succeed goal
+        if self.LEGACY:
+            self.last_time = 0
+            for pt in pts:
+                tfs = pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
+                duration = max(tfs - self.last_time, 0.1)
+                self.last_time = tfs
+                self.set_angle_publisher.publish(
+                    self._angles_from_point(trajectory, pt, duration * 1000))
+                if self._wait_cancelable(goal_handle, duration, 'exec'):
+                    return FollowJointTrajectory.Result()
+            if self._canceled_at_end(goal_handle):
+                return FollowJointTrajectory.Result()
+            goal_handle.succeed()
+            return FollowJointTrajectory.Result()
+
+        # ---- 整段一条命令 ----
+        last = pts[-1]
+        total = last.time_from_start.sec + last.time_from_start.nanosec * 1e-9
+        total = max(total, 0.3)          # 单点 / 零时长轨迹的急动保护
+        time_ms = int(total * 1000)
+        self.set_angle_publisher.publish(
+            self._angles_from_point(trajectory, last, time_ms))
+        self.get_logger().info(
+            'trajectory: %d points -> 1 command, target time %d ms'
+            % (len(pts), time_ms))
+        # 对齐驱动层：set_angle_callback 里 interval = time + INTERVAL_PAD_MS。
+        # 不等满就 succeed 会让舵机在半路被下一条命令打断（旧 bug）。
+        if self._wait_cancelable(
+                goal_handle, (time_ms + self.INTERVAL_PAD_MS) / 1000.0, 'exec'):
+            return FollowJointTrajectory.Result()
+        if self._canceled_at_end(goal_handle):
+            return FollowJointTrajectory.Result()
         goal_handle.succeed()
         return FollowJointTrajectory.Result()
 

@@ -1139,7 +1139,7 @@ def main():
             lv.set_status("[7/7] closing grip + home" if close_grip
                           else "[7/7] going home")
         if close_grip:
-            cli_grip("close", 10)
+            cli_grip("close", 4)
             print("  夹爪已闭合")
         rc2, out2 = run_cli(["home", "--wait", "%.1f" % args.wait, "--tol", "40.0"],
                             timeout=args.wait + 25)
@@ -1298,16 +1298,32 @@ def main():
         # 抬 z 卡满 90 秒，连卡两次。这里加"先脱开、再斜收"两步：
         #   ① 垂直抬 25mm 脱离物料（此时两指还在物料两侧，直接斜收会刮倒）
         #   ② 再按 pull_in 往底座方向收着往上（和 [5/7] 抬起同一个办法）
+        # ① 先垂直脱离 25mm（两指还在物料两侧，此时横向走会把它带倒）
         _lift0 = np.array([pl6[0], pl6[1], min(travel_z, pl6[2] + 25.0)])
-        cli_pose(_lift0, args.wait, max(args.tol, 22.0), not args.no_force,
-                 args.allow_far, settle=False)
+        rc_l0, act_l0 = lift_to(_lift0, args, tol=max(args.tol, 22.0))
+        if rc_l0 == 130:
+            return bail("松爪后脱离")
+        # ② 再斜着收上去到 travel_z
         lift = pull_in(lift, args.lift_pull_r)
         if abs(lift[0] - pl6[0]) + abs(lift[1] - pl6[1]) > 3.0:
             print("  伸展位形（半径 %.0fmm）→ 松爪后斜着往回收再抬升到 z=%.0f"
                   % (float(np.hypot(pl6[0], pl6[1])), travel_z))
-        cli_pose(lift, args.wait, max(args.tol, 22.0), not args.no_force,
-                 args.allow_far, settle=False)
-        go_home()
+        rc_l, act_l = lift_to(lift, args, tol=max(args.tol, 22.0))
+        if rc_l == 130:
+            return bail("松爪后抬升")
+
+        # 抬起来没有？没抬起来就**不能收爪** —— 两指还夹在物料两侧，
+        # close 会把它夹住带走（2026-11-03 现象："放置后没抬起就闭合夹爪"）。
+        # 判据用"比投放高度高出 20mm"，不用 travel_z：travel_z 取的是出发高度，
+        # --place-only 时可能本来就低。
+        got_z = None if act_l is None else act_l[2]
+        lifted = got_z is not None and got_z >= pl6[2] + 20.0
+        if not lifted:
+            print("  ⚠ 松爪后没抬起来（z=%s，投放高度 %.0f）。"
+                  % ("读不到" if got_z is None else "%.0f" % got_z, pl6[2]))
+            print("    保持张爪回 home —— 现在收爪会夹住刚放下的物料。"
+                  "下次可加 --place-lift 130 让它抬更高再横移。")
+        go_home(close_grip=lifted)
         return 0
 
     # ---- 1.5) --place-only：物料已经在爪里，直接进投放段
@@ -1589,7 +1605,7 @@ def main():
             print("\n→ 中断后自动收爪 + 回 home（再按一次 Ctrl+C 可强制退出）")
             _ABORT["flag"] = False
             try:
-                cli_grip("close", 8)
+                cli_grip("close", 4)
                 rc_h, out_h = run_cli(
                     ["home", "--wait", "20.0", "--tol", "40.0", "--close-grip"],
                     timeout=45)
@@ -1727,7 +1743,13 @@ def main():
     print("\n[4/7] 闭合夹爪")
     if lv is not None:
         lv.set_status("[4/7] closing grip")
-    rc, err = cli_grip("close", 20)
+    # wait 给 4 秒，**不是 20 秒**。
+    # 闭合的期望值是"两指到底"（joint7_left = -0.025，4 mm），但夹着物料时
+    # 根本到不了 —— 爪会停在物宽处（50 mm 物料约 48 mm），误差 44 mm 永远超容差。
+    # 原来给 20 秒，于是**每次抓取都白等 20 秒**才返回"未到位"，
+    # 而下面紧接着就把 2~22 mm 的误差判成"抓稳"了 —— 说明本来就预期到不了。
+    # 空爪到底只需 0.7 秒（舵机 time=1000ms），4 秒足够。
+    rc, err = cli_grip("close", 4)
     rec["close_err"] = "" if err is None else "%.2f" % err
     if err is None:
         # 一个数据都没收到，说明命令没送达（DDS 发现失败）或 joint_states 断了。

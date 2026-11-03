@@ -117,7 +117,11 @@ def grip(semantic: str, action: Optional[str] = None) -> Result:
                       detail="未知夹爪语义 %r，只接受 %s" % (semantic, list(config.GRIP_CMD)))
     cmd = config.GRIP_CMD[semantic]
     expect = config.GRIP_EXPECT[semantic]
-    argv = ["grip", cmd, "--wait", "12", "--tol", "1.0"]
+    # wait 4 s、tol 3 mm：闭合的期望值是"两指到底"，但夹着物料时到不了
+    # （50 mm 物料停在 48 mm 附近），误差永远超容差。原来 12 s + 1 mm
+    # 意味着**每次夹取都白等 12 秒**才判"未到位"——夹爪动作本身只要 0.7 s。
+    # tol 放到 3 mm：新爪 1 mm≈1.44°，3 mm 在舵机死区量级，不会误判。
+    argv = ["grip", cmd, "--wait", "4", "--tol", "3.0"]
     res = call(argv, action or semantic)
     if res.ok:
         res.detail = "%s -> CLI '%s' -> joint7_left 期望 %.3f m；%s" % (
@@ -134,7 +138,8 @@ def grip_deg(deg: float, action: str = "grip_deg") -> Result:
     （误差 4.7 mm）就被判"到位"，而物体 50 mm —— 两指根本没碰到，夹空。
     依据：78.1° 走 57 mm，1° ≈ 0.73 mm；舵机死区 0.5~0.8° ≈ 0.4~0.6 mm。
     """
-    argv = ["grip_deg", "%.1f" % deg, "--wait", "12", "--tol", "1.5"]
+    # 同 grip()：按比例闭合夹着物料时到不了目标，长 wait 只会白等。
+    argv = ["grip_deg", "%.1f" % deg, "--wait", "4", "--tol", "3.0"]
     return call(argv, action)
 
 
