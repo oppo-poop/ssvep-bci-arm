@@ -155,19 +155,25 @@ def go_home() -> link.Result:
 
 
 # ---------------------------------------------------------------- 抓取校验
-#: 两指间距换算。**2026-10-18 卡尺实测**（不是推算）：
-#:   joint7_left  0.000（舵机 100.0°）→ 两指张开 **65 mm**
-#:   joint7_left -0.025（舵机  21.9°）→ 两指 **8 mm**（合到底，两指间有结构间隙）
-#: 即行程 57 mm 对应 25 mm 的 joint7_left 位移。
+#: 两指间距换算。
+#:
+#: **2026-11-03 换爪，旧爪的 8~65 mm / -0.025 全部作废。** 新爪实测：
+#:   joint7_left  0.0000（舵机 100.0°）→ 张开约 10 mm
+#:   joint7_left -0.0080（舵机  75.0°）→ 完全闭合
+#:
+#: ⚠ 下面这组 GAP_MIN/MAX 是**按旧爪行程比例缩放出来的等效值，不是实测**：
+#:   换爪后只量了两个端点，没量 10 mm 是否准确。数字只能当"相对开度"看。
+#:   **但两个端点的判据是对的**（闭合→8、张开→65），check_holding 能用。
+#:   拿到卡尺数据后改 GAP_MAX_MM 与 GAP_MM_PER_M 即可，判据逻辑不用动。
 GAP_MIN_MM = 8.0
 GAP_MAX_MM = 65.0
-#: 完全合拢时 joint7_left 的值（URDF 下限）
-GAP_ZERO_POS = -0.025
+#: 完全合拢时 joint7_left 的值（新爪实测，2026-11-03）
+GAP_ZERO_POS = -0.008
 GAP_MM_PER_M = (GAP_MAX_MM - GAP_MIN_MM) / abs(GAP_ZERO_POS)
 
-#: 对应的舵机角度可用区间（低于 21.9° 会让 joint7_left 超 URDF 下限，
-#: 一旦超限 MoveIt 会把整机状态判为 invalid，之后所有规划全部失败）
-GRIP_DEG_MIN, GRIP_DEG_MAX = 21.9, 100.0
+#: 对应的舵机角度可用区间。低于 75.0° 新爪会顶死（旧爪是 21.9°，已失效）。
+#: 也别超 100°：joint7_left 会转正，超 URDF upper=0，MoveIt 判整机 invalid。
+GRIP_DEG_MIN, GRIP_DEG_MAX = 75.0, 100.0
 
 
 def gripper_gap_mm(pos: Optional[float]) -> Optional[float]:

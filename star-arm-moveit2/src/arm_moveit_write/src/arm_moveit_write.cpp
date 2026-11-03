@@ -153,8 +153,14 @@ private:
     // 注意命令名与物理动作相反（历史遗留，调用方用 GRIP_CMD 表映射）：
     //   "open"  -> 100°  -> 物理闭合
     //   "close" -> 21.9° -> 物理张开
-    constexpr double kServoClosed = 100.0;   // 物理：合拢
-    constexpr double kServoOpened = 21.9;    // 物理：张开（URDF 下限对应的值，不能再小）
+    // 2026-11-03 换爪后重标：新爪行程只有 10 mm（旧爪 57 mm）。
+    //   实测 joint7_left =  0.0000（100.0°）→ 张开 10 mm
+    //   实测 joint7_left = -0.0080（ 75.0°）→ 完全闭合
+    // **旧值 21.9° 在新爪上会让舵机在闭合后继续顶 18°，堵转过热。**
+    // 注意命名：这两个常量名是反的（历史遗留），kServoClosed=100° 实际是张开。
+    //   在 `if (command == "open")` 里用的是 kServoClosed —— 名字别信，看这里的分支。
+    constexpr double kServoClosed = 100.0;   // 物理：张开 10 mm（舵机角大）
+    constexpr double kServoOpened = 75.0;    // 物理：完全闭合（新爪实测位置）
 
     if (command == "open") {
       msg.target_angle = {kServoClosed};

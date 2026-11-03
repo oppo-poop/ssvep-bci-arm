@@ -59,20 +59,19 @@ DEFAULT_QUAT = (0.5, -0.5, 0.5, -0.5)
 BOUNDS = {"x": (0.278, 0.529), "y": (-0.324, 0.113), "z": (0.074, 0.438)}
 
 # 夹爪：arm_moveit_write 发的是舵机角度，换算 joint7_left = (deg-100)/100*0.032。
-# URDF 限位 lower=-0.025 / upper=0，所以可用区间是舵机 21.9°~100°。
-# **2026-10-18 实物实测方向**（推翻了 10-17 从仿真推出的结论）：
-#   100.0° -> joint7_left =  0.000 m   （两指张开约 50 mm）    ← CLI "open"
-#    50.0° -> joint7_left = -0.016 m   （约 18 mm）            ← driver 启动位
-#    21.9° -> joint7_left = -0.025 m   （两指合拢 0 mm）       ← CLI "close"
-# 即 pos 越负越合拢；open/close 是自然语义，不再"名字相反"。
-# ⚠ 舵机 0° 会算出 -0.032 m，**超 URDF 下限 28%**；一旦超限，MoveIt 会把整个
-#   机器人状态判为 invalid，OMPL 报 "Skipping invalid start state"，之后所有规划
-#   全部失败（表现为"发任何目标都不动"）。2026-10-18 实际踩到：arm_moveit_write
-#   的 close 分支原来发 0.0°，已改为 21.9°。
-GRIP_EXPECT = {"open": 0.0, "close": -0.025}
+# **2026-11-03 换爪后重标**（旧爪数据作废）：
+#   100.0° -> joint7_left =  0.0000 m   两指张开 10 mm    ← CLI "open"
+#    75.0° -> joint7_left = -0.0080 m   完全闭合          ← CLI "close"
+# 旧爪是 100°→65 mm、21.9°→8 mm（行程 57 mm），新爪只有 10 mm。
+#
+# ⚠ **21.9° 在新爪上会顶死**：爪在 75° 就已合到底，再往 21.9° 是硬顶 18°，
+#   堵转/过流/过热。2026-11-03 的"夹爪张不开"就是它。
+# ⚠ 舵机 0° 算出 -0.032 m，超 URDF 下限 28%，会让 MoveIt 把整机判为 invalid，
+#   之后所有规划全部失败（表现为"发任何目标都不动"）。
+GRIP_EXPECT = {"open": 0.0, "close": -0.008}
 
-#: 夹爪舵机可用角度区间。低于 21.9° 会让 joint7_left 超出 URDF 下限（见上）。
-GRIP_DEG_MIN, GRIP_DEG_MAX = 21.9, 100.0
+#: 夹爪舵机可用角度区间。低于 75.0° 会让新爪顶死。
+GRIP_DEG_MIN, GRIP_DEG_MAX = 75.0, 100.0
 
 JOINT_NAMES = [f"joint{i}" for i in range(1, 7)]
 BASE_FRAME = "world"

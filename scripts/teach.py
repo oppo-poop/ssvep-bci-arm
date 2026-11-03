@@ -46,7 +46,8 @@ SPEED_MM_S = 3.0
 #:   舵机 100° → joint7_left =  0.000 → 两指**张开**（约 50 mm）
 #:   舵机 21.9° → joint7_left = -0.025 → 两指**合拢**（0 mm）
 #: 21.9° 是 URDF 下限对应的角度，再小就超限（超限会让 MoveIt 判整机状态非法）。
-GRIP_CLOSED_DEG, GRIP_OPEN_DEG = 21.9, 100.0
+#: 2026-11-03 换爪后重标：新爪闭合在 75°，旧值 21.9° 会顶死。
+GRIP_CLOSED_DEG, GRIP_OPEN_DEG = 75.0, 100.0
 #: 2026-10-18 卡尺实测：舵机 21.9° -> 8 mm，100° -> 65 mm
 GAP_MIN_MM, GAP_MAX_MM = 8.0, 65.0
 MAX_STEP_MM = 50.0
