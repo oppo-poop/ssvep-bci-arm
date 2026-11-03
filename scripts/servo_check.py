@@ -68,16 +68,16 @@ JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4",
                "joint5", "joint6", "joint7(夹爪)"]
 
 #: 夹爪换算，2026-11-03 拆装后手推实测（与 robo_driver.GRIP_DEG_* 一致）：
-#:   舵机  75.0° → 两指闭合 4 mm  → joint7_left = -0.025
-#:   舵机 154.1° → 两指张开 65 mm → joint7_left =  0.000
-#: 拆装前是 21.9°/100.0°，零位偏了约 54°。
-GRIP_DEG_CLOSE = 75.0
-GRIP_DEG_OPEN = 154.1
+#:   舵机  86.7° → 两指闭合 4 mm  → joint7_left = -0.025
+#:   舵机 174.8° → 两指张开 65 mm → joint7_left =  0.000
+#: 拆装前是 21.9°/100.0°，零位偏了约 65°。
+GRIP_DEG_CLOSE = 86.7
+GRIP_DEG_OPEN = 174.8
 GRIP_POS_MIN = -0.025
 GRIP_GAP_MIN_MM = 4.0
 GRIP_GAP_MAX_MM = 65.0
 #: 可用角区间（比实测两端各放 5° 余量，用于发现"读数跑飞"）。
-GRIP_DEG_RANGE = (70.0, 160.0)
+GRIP_DEG_RANGE = (81.0, 180.0)
 
 #: 各舵机的读数是否应该接近 0（前六个）。这里只做"明显跑飞"的粗判，
 #: 精确的零位偏差是 zero_calib.py 的活，不是这个脚本的。

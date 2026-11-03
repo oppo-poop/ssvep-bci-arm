@@ -59,15 +59,15 @@ DEFAULT_QUAT = (0.5, -0.5, 0.5, -0.5)
 BOUNDS = {"x": (0.278, 0.529), "y": (-0.324, 0.113), "z": (0.074, 0.438)}
 
 # 夹爪：arm_moveit_write 发的是舵机角度；joint7_left 的换算在 robo_driver 里。
-# **2026-11-03 夹爪拆装后零位偏移约 54°，按手推实测重标**：
-#   舵机  75.0° -> joint7_left = -0.025 m   两指闭合 4 mm    ← CLI "close"
-#   舵机 154.1° -> joint7_left =  0.000 m   两指张开 65 mm   ← CLI "open"
+# **2026-11-03 夹爪拆装后零位偏移，按卸力手推实测两端重标**：
+#   舵机  86.7° -> joint7_left = -0.025 m   两指闭合 4 mm    ← CLI "close"
+#   舵机 174.8° -> joint7_left =  0.000 m   两指张开 65 mm   ← CLI "open"
 # 拆装前是 21.9°~100.0°，那组值现在会把舵机顶死（2026-11-03 "张不开"的直接原因）。
 GRIP_EXPECT = {"open": 0.0, "close": -0.025}
 
-#: 夹爪舵机可用角度区间（实测）。低于 75° 顶死，高于 154.1° 会撑坏爪。
+#: 夹爪舵机可用角度区间（实测）。低于 86.7° 顶死，高于 174.8° 撑坏爪。
 #: 只对当前这次装配有效；再拆装一次要重量。
-GRIP_DEG_MIN, GRIP_DEG_MAX = 75.0, 154.1
+GRIP_DEG_MIN, GRIP_DEG_MAX = 86.7, 174.8
 
 JOINT_NAMES = [f"joint{i}" for i in range(1, 7)]
 BASE_FRAME = "world"

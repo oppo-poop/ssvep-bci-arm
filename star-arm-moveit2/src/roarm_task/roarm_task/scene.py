@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 Xyz = Tuple[float, float, float]
 
-#: 夹爪行程（2026-10-18 卡尺实测）：grip 0 -> 8 mm，grip 1 -> 65 mm
+#: 夹爪行程（2026-11-03 拆装后手推实测）：grip 0 -> 4 mm，grip 1 -> 65 mm
 GAP_MIN_MM, GAP_MAX_MM = 8.0, 65.0
 
 
@@ -27,8 +27,8 @@ class Scene:
     place: Xyz                     # 末端放置点
     object_height: float = 0.05    # 物体高度，决定抬起量
     object_width: float = 0.03     # 物体宽度，决定夹爪该停在多开
-    grip_open: float = 1.0         # 抓取前张开比例（0=8mm，1=65mm）
-    grip_close: float = 0.7        # 合爪时合到多少比例（0=8mm，1=65mm）
+    grip_open: float = 1.0         # 抓取前张开比例（0=4mm，1=65mm）
+    grip_close: float = 0.72       # 合爪时合到多少比例（0=4mm，1=65mm）
     standoff: float = 0.08         # 接近/撤离的竖直偏移
     clearance: float = 0.06        # 抬起后离台面的净空
     verify_grasp: bool = False     # 是否校验"真的夹住了"
@@ -92,7 +92,7 @@ class Scene:
             object_height=float(d.get("object_height", 0.05)),
             object_width=float(d.get("object_width", 0.03)),
             grip_open=float(d.get("grip_open", 1.0)),
-            grip_close=float(d.get("grip_close", 0.7)),
+            grip_close=float(d.get("grip_close", 0.72)),
             standoff=float(d.get("standoff", 0.08)),
             clearance=float(d.get("clearance", 0.06)),
             verify_grasp=bool(d.get("verify_grasp", False)),
