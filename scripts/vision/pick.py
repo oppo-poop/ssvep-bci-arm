@@ -86,6 +86,15 @@ DEFAULT_OFFSET_MM = (16.6, 23.6, 86.2)
 #: 且两端都实测可达 —— 目标是"看得见就能抓"，不再有软件侧的额外收缩。
 BOUNDS = {"x": (0.278, 0.670), "y": (-0.400, 0.350), "z": (0.074, 0.438)}
 
+#: roarm_cli.py 的「任务工作区」，比上面 BOUNDS 窄（上位机作者划的旧推荐区）。
+#: 超出它，roarm_cli 会打印「拒绝：目标超出任务工作区」并退出 —— 命令静默
+#: 失败、act 读不到。2026-11-03 投放点 link6 (0.571, 0.181) 就栽在这：
+#: 投放那一步因 z 超界碰巧加了 --force 放行，后面松爪抬升/回位全被拒，
+#: 一路「z=读不到」，最后被误判成「没抬起来」。
+#: pick.py 的 BOUNDS 是 probe_reach.py 实测可达，越旧推荐区 != 撞限位，
+#: 所以统一在 cli_pose 里自动补 --force，让整轮命令一致执行。
+CLI_BOUNDS = {"x": (0.278, 0.529), "y": (-0.324, 0.113), "z": (0.074, 0.438)}
+
 #: 命令端 z 补偿（米）。
 #: 2026-10-26 19:14 实测（空载、悬停）：命令 0.114 / 0.200 / 0.300，落在
 #: 0.101 / 0.186 / 0.286 —— 低 13~14mm，先补了 +0.014。
@@ -446,13 +455,22 @@ def cli_pose(xyz_mm, wait, tol, force, allow_far=False, retries=2, settle=True):
         # x/y 超界说明物料根本不在可达范围，硬发只会让机械臂去撞限位
         print("  ⛔ 超出工作区（%s），不硬发" % "、".join(far))
         return 3, None
-    if bad:
+
+    # CLI 还有一套更窄的「任务工作区」，超出就拒绝并退出（act 读不到）。
+    # 两套 z 范围完全一致，所以这里只补查 x/y。统一自动加 --force，
+    # 避免「投放碰巧加了 force、抬升却被拒」这种同一点位两种结果。
+    strict = ["%s=%.1fmm" % (k, v * 1000)
+              for k, v in (("x", x), ("y", y))
+              if not (CLI_BOUNDS[k][0] <= v <= CLI_BOUNDS[k][1])]
+    why = bad + (["超 CLI 推荐区 " + "/".join(strict)] if strict else [])
+    if why:
         if not force:
-            print("  ⚠ 超工作区 %s，但 --no-force 已指定 -> 放弃这一步" % "、".join(bad))
+            print("  ⚠ %s，但 --no-force 已指定 -> 放弃这一步" % "、".join(why))
             return 2, None
         # z 低于下限是抓取的正常姿态（夹爪要贴到台面），这里加 --force 是预期行为
-        print("  ⚠ 超工作区 %s，自动加 --force" % "、".join(bad))
-        args.append("--force")
+        print("  ⚠ %s，自动加 --force" % "、".join(why))
+        if "--force" not in args:
+            args.append("--force")
 
     # 分段逼近：长轨迹会被驱动丢点、停在半路（2026-10-23）。
     # 从当前实际位置重新规划，剩下的路短了，丢点影响就小很多。
@@ -544,7 +562,7 @@ def lift_to(up_mm, args, tol=30.0):
 
 
 def cli_pose_zfix(target, wait, tol, force, allow_far=False, iters=1,
-                  dead=4.0, max_step=8.0):
+                  dead=4.0, max_step=8.0, up=False):
     """移动到一个点，z 落点偏超过 dead 就补发一次。
 
     为什么需要：`repeatability.csv` 里同一个目标点 10 次落点极差只有 **2.5mm**
@@ -552,29 +570,43 @@ def cli_pose_zfix(target, wait, tol, force, allow_far=False, iters=1,
     也就是"每次都很稳地停在错的地方"。量一次偏差、把目标反着挪一点再发一次，
     落点能进 ±5mm。
 
+    up=False（默认，抓取段用）：只补「偏高」（臂比目标高，往下压）。偏低不补 ——
+      抓取时指尖更低照样能夹，且历史上「往上抬的短移动会卡满 90 秒」
+      （2026-10-23）。那个"卡住"其实是逐点下发互相覆盖（2026-11-03 已修），
+      但抓取段保持保守。
+    up=True（投放段用）：偏低也补。投放落点偏低会把物料按在桌面上 ——
+      2026-11-03 日志：投放高度 72 -> 实际 59，桌面 57.6，只差 1.4mm。
+      ⚠ 风险：伸展位形（半径 600mm 以上）**带载垂直抬不动**，补发那一步可能
+        白等。护栏：短 wait 25s 兜底 + max_step 8mm 限幅 + 补偿后更远立即停。
+        真机若发现这一步卡住，用 --no-zfix 关掉整段补偿（回到旧行为）。
+
     安全约束（2026-10-21 踩到才加的）：
       * 一次只补 max_step=8mm，避免一脚踩过头
-      * 补偿后如果反而更远，就回退到第一次的位置
+      * 补偿后如果反而更远，就不再继续（保留上一次的落点记录）
       * **不管补没补上，只要有位置就返回 0** —— 抓取看的是最终落点，
         不是"有没有进容差"。之前在这里 return 非零，导致明明能抓却中止。
     """
     rc, act = cli_pose(target, wait, tol, force, allow_far)
     if act is None:
         return rc, None
+    # 补发用短 wait：历史上「往上抬的短移动会卡满 90 秒」（2026-10-23），
+    # 真正原因是逐点下发互相覆盖（2026-11-03 已修），但留个 25 秒兜底，
+    # 万一再卡也不至于干等两分钟。
+    fix_wait = min(wait, 25.0)
     for i in range(iters):
-        # dz = 目标 - 实测。dz < 0 表示臂比目标"高"（要往下压）；
-        # dz > 0 表示偏低。偏低对抓取无害（指尖更低照样能夹），而且
-        # "往上抬"的短移动实测会卡满 90 秒不动（2026-10-23），所以不补。
+        # dz = 目标 - 实测。dz < 0 表示臂比目标"高"（要往下压），dz > 0 偏低。
         dz = target[2] - act[2]
-        if dz >= -dead:
-            if dz > dead:
-                print("  落点偏低 %.0f mm，直接抓（不再上抬）" % dz)
+        if abs(dz) <= dead:
+            break
+        if dz > dead and not up:
+            print("  落点偏低 %.0f mm，不补（偏低时指尖更低照样能夹，"
+                  "且短距离上抬在伸展位形可能抬不动）" % dz)
             break
         step = max(-max_step, min(max_step, dz))
         fix = np.array([target[0], target[1], target[2] + step])
-        print("  z 偏高 %+.1f mm → 目标改发 z=%.1f（第 %d 次补偿）"
-              % (dz, fix[2], i + 1))
-        rc2, act2 = cli_pose(fix, wait, tol, force, allow_far)
+        print("  z %s %.1f mm → 目标改发 z=%.1f（第 %d 次补偿）"
+              % ("偏低" if dz > 0 else "偏高", abs(dz), fix[2], i + 1))
+        rc2, act2 = cli_pose(fix, fix_wait, tol, force, allow_far)
         if rc2 == 130:                  # Ctrl+C：不沿用、不再补发
             return 130, act
         if act2 is None:
@@ -969,7 +1001,7 @@ def main():
                     default=[0.38, -0.30, 0.60, 0.30],
                     metavar=("X1", "Y1", "X2", "Y2"),
                     help="画在画面上的推荐投放区（物料坐标，米），"
-                         "默认 x 0.38~0.55、y -0.25~0.25")
+                         "默认 x 0.38~0.60、y -0.30~0.30")
     ap.add_argument("--drop-standoff", type=float, default=160.0,
                     metavar="MM",
                     help="点选投放位置前先往后退多少 mm（朝底座方向），"
@@ -1226,7 +1258,7 @@ def main():
                   % _rad)
             print("     物料还在爪里，先手动放下：")
             print("       ./scripts/roarm_cli.py grip open --wait 10")
-            print("       ./scripts/roarm_cli.py home --wait 25 --tol 40 --close-grip")
+            print("       ./scripts/roarm_cli.py home --wait 25 --tol 40")
             print("     → 把色纸/投放位置往底座方向挪 50~80mm，")
             print("       或者把 --place-dxy 的 x 调小（它会把投放点整体往远处推）。")
             return 1
@@ -1275,8 +1307,11 @@ def main():
             rc, act_b = cli_pose(pl6, args.wait, args.tol, not args.no_force,
                                  args.allow_far, settle=False)
         else:
+            # up=True：投放落点偏低也补。偏低 13mm 会把物料按在桌面上
+            # （2026-11-03 实测：投放高度 72 -> 实际 59，桌面 57.6）。
+            # 若该点位在伸展区、带载抬不动，用 --no-zfix 关掉整段补偿。
             rc, act_b = cli_pose_zfix(pl6, args.wait, args.tol, not args.no_force,
-                                      args.allow_far)
+                                      args.allow_far, up=True)
         if act_b is None:
             print("  ⚠ 降不到放置高度，物料还在夹爪里，请手动处理（或 --no-place）")
             return 1
@@ -1365,10 +1400,13 @@ def main():
         # home 只是"挪开让相机看得见物料"，不需要精度；而且这台臂有固定偏差
         # （目标 365 → 落点 354，x 还偏 +4mm），用默认 5mm 容差必然判失败，
         # 还会白等满 30 秒。所以这里单独放宽到 25mm。
-        # --close-grip：复位前先把爪子收拢。开局爪子多半是张着 60mm 的
-        # （上一次跑完还没收，或者刚起栈），这么宽转位容易扫到桌面/色纸/线缆。
-        rc, out = run_cli(["home", "--wait", "%.1f" % args.wait, "--tol", "40.0",
-                           "--close-grip"],
+        # 复位前先把爪子收拢：开局爪子多半张着 60mm（上次跑完没收），
+        # 这么宽转位容易扫到桌面/色纸/线缆。
+        # ⚠ 别写 --close-grip —— roarm_cli 没有这个参数，传了会 argparse
+        # 报错、整条 home 命令根本不执行（2026-11-03 日志开头那句
+        # "unrecognized arguments: --close-grip"，还被当成"臂有固定偏差"糊弄过去）。
+        cli_grip("close", 4)
+        rc, out = run_cli(["home", "--wait", "%.1f" % args.wait, "--tol", "40.0"],
                           timeout=args.wait + 25)
         show(out)
         if rc != 0:
@@ -1607,8 +1645,7 @@ def main():
             try:
                 cli_grip("close", 4)
                 rc_h, out_h = run_cli(
-                    ["home", "--wait", "20.0", "--tol", "40.0", "--close-grip"],
-                    timeout=45)
+                    ["home", "--wait", "20.0", "--tol", "40.0"], timeout=45)
                 show(out_h)
                 print("  ✅ 已回 home" if rc_h == 0
                       else "  ⚠ 回 home 没确认到位（臂有固定偏差属正常），位置大致在 home")
