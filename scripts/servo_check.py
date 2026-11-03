@@ -67,15 +67,17 @@ SERVO_IDS = [0, 1, 2, 3, 4, 5, 6]
 JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4",
                "joint5", "joint6", "joint7(夹爪)"]
 
-#: 夹爪舵机的零位读数与换算（与 robo_driver 的 servoangle2jointstate 一致）
-#:   pos(m) = (deg - 100) / 100 * 0.032
-#:   开度(mm) = 8 + (pos + 0.025) / 0.025 * 57      → 8 mm(合到底) ~ 65 mm(全开)
-GRIP_ZERO_DEG = 100.0
+#: 夹爪换算，2026-11-03 拆装后手推实测（与 robo_driver.GRIP_DEG_* 一致）：
+#:   舵机  75.0° → 两指闭合 4 mm  → joint7_left = -0.025
+#:   舵机 154.1° → 两指张开 65 mm → joint7_left =  0.000
+#: 拆装前是 21.9°/100.0°，零位偏了约 54°。
+GRIP_DEG_CLOSE = 75.0
+GRIP_DEG_OPEN = 154.1
 GRIP_POS_MIN = -0.025
-GRIP_GAP_MIN_MM = 8.0
+GRIP_GAP_MIN_MM = 4.0
 GRIP_GAP_MAX_MM = 65.0
-#: 夹爪舵机的可用角区间（2026-10 卡尺 + 行程实测）。超出就说明没校准或读数异常。
-GRIP_DEG_RANGE = (21.0, 101.0)
+#: 可用角区间（比实测两端各放 5° 余量，用于发现"读数跑飞"）。
+GRIP_DEG_RANGE = (70.0, 160.0)
 
 #: 各舵机的读数是否应该接近 0（前六个）。这里只做"明显跑飞"的粗判，
 #: 精确的零位偏差是 zero_calib.py 的活，不是这个脚本的。
@@ -391,8 +393,8 @@ def read_one(mgr, sid, samples=1, ping_only=False):
 
 
 def grip_gap_mm(deg):
-    """舵机角度 → 夹爪开度（mm）。与 robo_driver 的换算一致。"""
-    pos = (deg - GRIP_ZERO_DEG) / 100.0 * 0.032
+    """舵机角度 → 夹爪开度（mm）。与 robo_driver.servoangle2jointstate 一致。"""
+    pos = (deg - GRIP_DEG_OPEN) * (0.025 / (GRIP_DEG_OPEN - GRIP_DEG_CLOSE))
     ratio = (pos - GRIP_POS_MIN) / (0.0 - GRIP_POS_MIN)
     return GRIP_GAP_MIN_MM + ratio * (GRIP_GAP_MAX_MM - GRIP_GAP_MIN_MM)
 

@@ -56,6 +56,14 @@ class uservo_ex:
     # 2026-10-18 实测：把臂摆成 Γ 形（FK 末端距 URDF 零位 4.8 mm）时的读数。
     ZERO_OFFSET_DEG = [0.4, -0.2, -0.1, 1.3, -0.3, 0.8]
 
+    #: 夹爪（joint7）的实测端点，2026-11-03 拆装后重标。
+    #:   舵机  75.0°  → 两指完全闭合（4 mm）  → joint7_left = -0.025
+    #:   舵机 154.1°  → 两指完全张开（65 mm）  → joint7_left =  0.000
+    #: 拆装前是 21.9°~100.0°，零位偏移了约 54°。
+    #: ⚠ 这组值只对"当前这次装配"有效，再拆装一次就要重新量。
+    GRIP_DEG_CLOSE = 75.0
+    GRIP_DEG_OPEN = 154.1
+
 
     # 参数 / Parameters:
     def __init__(self,robo_type,log = None):
@@ -101,7 +109,12 @@ class uservo_ex:
             # 先扣掉零位偏移，再换成弧度
             return cls.degrees_to_radians(servo_angle - cls.ZERO_OFFSET_DEG[servo_id])
         elif servo_id == 6:
-            return cls.degrees_to_meters(servo_angle-100)
+            # 2026-11-03 拆装后零位偏移，旧的 (deg-100)/100*0.032 作废：
+            # 它把 100° 当全开，而实测全开在 154.1°，于是 100° 之后
+            # joint 会转正、超 URDF upper=0，臂就卡在"只开 10 mm"。
+            # 现在按实测两端线性映射，joint 始终落在 [-0.025, 0]。
+            span = cls.GRIP_DEG_OPEN - cls.GRIP_DEG_CLOSE      # 79.1°
+            return (servo_angle - cls.GRIP_DEG_OPEN) * (0.025 / span)
 
     # 设置角度（指定转速） / Send angle commands with specified speed
     def set_angle_by_interval(self, size, command_data_list):

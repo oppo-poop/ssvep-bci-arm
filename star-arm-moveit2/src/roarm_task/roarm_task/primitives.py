@@ -155,25 +155,19 @@ def go_home() -> link.Result:
 
 
 # ---------------------------------------------------------------- 抓取校验
-#: 两指间距换算。
-#:
-#: **2026-11-03 换爪，旧爪的 8~65 mm / -0.025 全部作废。** 新爪实测：
-#:   joint7_left  0.0000（舵机 100.0°）→ 张开约 10 mm
-#:   joint7_left -0.0080（舵机  75.0°）→ 完全闭合
-#:
-#: ⚠ 下面这组 GAP_MIN/MAX 是**按旧爪行程比例缩放出来的等效值，不是实测**：
-#:   换爪后只量了两个端点，没量 10 mm 是否准确。数字只能当"相对开度"看。
-#:   **但两个端点的判据是对的**（闭合→8、张开→65），check_holding 能用。
-#:   拿到卡尺数据后改 GAP_MAX_MM 与 GAP_MM_PER_M 即可，判据逻辑不用动。
-GAP_MIN_MM = 8.0
+#: 两指间距换算。**2026-11-03 拆装后手推实测**：
+#:   舵机  75.0°（joint7_left -0.025）→ 两指闭合 **4 mm**
+#:   舵机 154.1°（joint7_left  0.000）→ 两指张开 **65 mm**
+#: 行程 61 mm。joint 坐标仍是标准的 [-0.025, 0]，见 robo_driver.GRIP_DEG_*。
+GAP_MIN_MM = 4.0
 GAP_MAX_MM = 65.0
-#: 完全合拢时 joint7_left 的值（新爪实测，2026-11-03）
-GAP_ZERO_POS = -0.008
+#: 完全合拢时 joint7_left 的值（URDF 下限，未变）
+GAP_ZERO_POS = -0.025
 GAP_MM_PER_M = (GAP_MAX_MM - GAP_MIN_MM) / abs(GAP_ZERO_POS)
 
-#: 对应的舵机角度可用区间。低于 75.0° 新爪会顶死（旧爪是 21.9°，已失效）。
-#: 也别超 100°：joint7_left 会转正，超 URDF upper=0，MoveIt 判整机 invalid。
-GRIP_DEG_MIN, GRIP_DEG_MAX = 75.0, 100.0
+#: 夹爪舵机可用角度区间（实测）。低于 75° 会顶死，高于 154.1° 会撑坏爪。
+#: 这两个值只对当前这次装配有效；再拆装一次就要重新量。
+GRIP_DEG_MIN, GRIP_DEG_MAX = 75.0, 154.1
 
 
 def gripper_gap_mm(pos: Optional[float]) -> Optional[float]:
