@@ -1,17 +1,17 @@
 {
   "offset_mm": [
-    50.6,
+    32.1,
     23.6,
-    89.2
+    79.2
   ],
-  "n": 0,
+  "n": 2,
   "std_mm": [
     0.0,
     0.0,
     0.0
   ],
   "rms_mm": 0.0,
-  "updated": "2026-11-01 18:07:00",
-  "source": "2026-11-01 换爪 + 三色流程联调累积：换爪 off_z 87.2→72.2；三色实抓先 +17/+25（→53.6/89.2），再 y+5（off_x 53.6→48.6）。以后调抓取点直接改 offset_mm，不用带 --dxy。",
-  "note": "残差几乎是常数（斜率 0.02，可忽略），所以补在偏移上；xy_correction 以 p0 为锚无法表达常数项，改 b 会重复补偿。⚠ 不要再用 gripper_offset_calib.py 覆盖：它算的是 mean(act-obj)，而 act 约等于 obj+当时偏移，等于把历次偏移做平均，没有信息量。⚠ 改这里的 z 之后，cap/vision_arm_color.py 的 GRASP_D_MM 也要同步（世界系 = (off_z, -off_x)），当前应为 (89.2, -48.6)。"
+  "updated": "2026-11-04 21:38:00",
+  "source": "2026-11-04 手眼重标后按 probe 重建：两个 probe 点的 dxy 都是 (-10, +25)/( -10, +10)，x 常数 -10 → off_z 89.2-10=79.2；y 的常数部分 +18.5（线性拟合的截距）→ off_x 50.6-18.5=32.1。y 的比例部分交给 xy_correction（A[1][1]=1.24432），因为 p0 机制会把 b 抵消，常数只能放这里。",
+  "note": "⚠ 不要再用 gripper_offset_calib.py 覆盖：它算的是 mean(act-obj)，没有信息量。⚠ 改 off_x/off_z 后必须同步 cap/vision_arm_color.py 的 GRASP_D_MM = (off_z, -off_x)，当前应为 (79.2, -32.1)。校验：用本文件 + xy_correction 算出的 link6 在 probe 两点为 (517.4,-279.5)/(501.3,290.3)，与当时目测对齐位置一致。"
 }

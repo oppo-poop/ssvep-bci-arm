@@ -26,7 +26,7 @@
     * 默认姿态四元数 (0.5, -0.5, 0.5, -0.5) 是零位实测的末端姿态（world->link6，RPY −90/0/−90）
     * home 是**笛卡尔点**不是关节零位：IK 会解出 j4≈5.9°/j6≈−5.9°
     * 仿真里夹爪要能动，必须先起 sim_gripper_bridge（sim_up.sh 会自动起）。
-      ⚠ 实测 open/close 与物理开合方向相反，见 GRIP_EXPECT 上方注释
+      open/close 为自然语义：open=两指张开，close=两指合拢。
 """
 import argparse
 import math
@@ -41,33 +41,28 @@ from tf2_ros import Buffer, TransformListener
 from robo_interfaces.msg import PositionOrientation, GripperCommand, SetAngle
 from sensor_msgs.msg import JointState
 
-# 工程 README 记录的 4 个 Cello 路点（位置，米，世界系）
-WAYPOINTS = {
-    "home":  (0.479, 0.000, 0.369),
-    "start": (0.330, -0.324, 0.074),
-    "right": (0.529, 0.113, 0.246),
-    "up":    (0.278, 0.000, 0.438),
-}
+from roarm_lib import params
 
-# 零位末端姿态（2026-10-17 实测 world->link6）
-DEFAULT_QUAT = (0.5, -0.5, 0.5, -0.5)
+# 路点、默认姿态、工作区、夹爪口径全部来自 config/robot.json。
+# 本文件不再保存第二份数值；要改去 config/。
+WAYPOINTS = params.WAYPOINTS
+DEFAULT_QUAT = params.DEFAULT_QUAT
 
 # 任务工作区（README §七 的"推荐工作区"）。**这不是机械极限**：
 # y 方向左 -0.324 / 右 +0.113 左右不对称，真实机械不可能这样，
 # 说明它只是上位机作者划的建议作业区。越界默认拒绝，--force 可越过；
 # 示教（teach.py --force）时应该越过，自动执行时保持保守。
-BOUNDS = {"x": (0.278, 0.529), "y": (-0.324, 0.113), "z": (0.074, 0.438)}
+BOUNDS = params.BOUNDS
 
 # 夹爪：arm_moveit_write 发的是舵机角度；joint7_left 的换算在 robo_driver 里。
 # **2026-11-03 夹爪拆装后零位偏移，按卸力手推实测两端重标**：
 #   舵机  86.7° -> joint7_left = -0.025 m   两指闭合 4 mm    ← CLI "close"
 #   舵机 174.8° -> joint7_left =  0.000 m   两指张开 65 mm   ← CLI "open"
-# 拆装前是 21.9°~100.0°，那组值现在会把舵机顶死（2026-11-03 "张不开"的直接原因）。
-GRIP_EXPECT = {"open": 0.0, "close": -0.025}
+GRIP_EXPECT = params.GRIP_EXPECT_CLI
 
 #: 夹爪舵机可用角度区间（实测）。低于 86.7° 顶死，高于 174.8° 撑坏爪。
 #: 只对当前这次装配有效；再拆装一次要重量。
-GRIP_DEG_MIN, GRIP_DEG_MAX = 86.7, 174.8
+GRIP_DEG_MIN, GRIP_DEG_MAX = params.CLOSE, params.OPEN
 
 JOINT_NAMES = [f"joint{i}" for i in range(1, 7)]
 BASE_FRAME = "world"
@@ -140,6 +135,20 @@ class RoArmCli(Node):
         msg.servo_id = [6]
         msg.target_angle = [float(deg)]
         msg.time = [1000]
+        self.set_angle_pub.publish(msg)
+
+    def send_arm_deg(self, degs, time_ms=3000):
+        """直接发 6 个臂关节的舵机角度（URDF 度，驱动会补零位偏移）。
+
+        用途：收纳姿态。走 set_angle 而不是 MoveIt，避免为了一个固定安全姿态
+        再起一次规划；舵机自带梯形速度规划，time_ms 控制整段时长。
+        """
+        if len(degs) != 6:
+            raise ValueError("send_arm_deg 需要 6 个臂关节角度")
+        msg = SetAngle()
+        msg.servo_id = list(range(6))
+        msg.target_angle = [float(v) for v in degs]
+        msg.time = [int(time_ms)] * 6
         self.set_angle_pub.publish(msg)
 
     # ---------- 观测 ----------
@@ -233,6 +242,7 @@ def cmd_list():
           % (BOUNDS["x"] + BOUNDS["y"] + BOUNDS["z"]))
     print("默认姿态四元数：", DEFAULT_QUAT)
     print("校验坐标系：%s -> %s" % (BASE_FRAME, EE_FRAME))
+    print("  park   ：收纳姿态（6 轴，3 s，走 set_angle）")
 
 
 def report(node, xyz, quat, timeout, tol_mm):
@@ -301,6 +311,16 @@ def handle(node, argv, force, timeout, tol_mm):
                                                for i, d in enumerate(ang)))
         return EXIT_OK
 
+    if op in ("park", "storage"):
+        # 收纳姿态：直接走 set_angle_topic（robo_driver 会补零位偏移），
+        # 不经过 MoveIt —— 固定安全姿态，没必要再规划一次。
+        park = [p - o for p, o in zip(params.PARK_POSE_DEG,
+                                     params.ZERO_OFFSET_DEG)]
+        node.send_arm_deg(park, 3000)
+        print("→ 收纳姿态（6 轴，3 s；set_angle 直发）")
+        time.sleep(3.6)
+        return EXIT_OK
+
     if op in ("grip", "gripper"):
         if len(argv) < 2 or argv[1] not in GRIP_EXPECT:
             print("用法：grip open|close   （要半开用 grip_deg <角度>）")
@@ -323,13 +343,12 @@ def handle(node, argv, force, timeout, tol_mm):
         if not (GRIP_DEG_MIN <= deg <= GRIP_DEG_MAX):
             print("拒绝：%.1f° 超出可用范围 [%.1f, %.1f]"
                   % (deg, GRIP_DEG_MIN, GRIP_DEG_MAX))
-            print("  joint7_left = (deg-100)/100*0.032，超限会让 MoveIt 把整机状态判为非法，"
-                  "之后所有规划都会失败")
+            print("  joint7_left = (deg - 174.8) * 0.025 / 88.1，"
+                  "超限会让 MoveIt 把整机状态判为非法，之后所有规划都会失败")
             return EXIT_REJECT
         node.send_grip_deg(deg)
-        target = (deg - 100.0) / 100.0 * 0.032
-        # 两指间距：实测行程 8~65 mm 对应 joint7_left -0.025~0
-        gap = 8.0 + (target + 0.025) * (57.0 / 0.025)
+        target = params.servo_to_joint(deg)
+        gap = params.gap_mm_from_servo(deg)
         print("→ 夹爪 %.1f°（目标 joint7_left = %.4f m，两指间距约 %.0f mm）"
               % (deg, target, gap))
 

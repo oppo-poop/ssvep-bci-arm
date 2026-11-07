@@ -22,12 +22,23 @@ std::vector<std::string> joint_name = {
     "joint6",
     "joint7_left"};
 
+// 夹爪端点：与 config/robot.json 一致，由 scripts/grip_check.py 强制检查。
+// 2026-11-03 拆装后实测：86.7° = 闭合 4 mm（joint -0.025），
+// 174.8° = 张开 65 mm（joint 0.000）。
+constexpr double kServoClose = 86.7;
+constexpr double kServoOpen = 174.8;
+constexpr double kJointMin = -0.025;
+constexpr double kJointMax = 0.0;
+
 float jointstate2servoangle(uint8_t servo_id, float joint_state)
 {
+  // 臂关节：记录 URDF 角度（弧度→度）。回放到 set_angle_topic 时
+  // robo_driver 会在写方向补零位偏移，所以这里**不能**再加偏移。
   if (servo_id < 6)
     return joint_state * (180 / 3.1415926);
   else if (servo_id == 6)
-    return (joint_state / 0.032) * 100 + 100;
+    return kServoClose + (joint_state - kJointMin)
+           * (kServoOpen - kServoClose) / (kJointMax - kJointMin);
   else
     return 0;
 }
@@ -72,10 +83,6 @@ public:
             custom_msg->servo_id.push_back(id);
             auto angle = jointstate2servoangle(id, msg.position[i]);
             custom_msg->time.push_back(200);
-            if (id ==6)
-            {
-              angle -=10;
-            }
             custom_msg->target_angle.push_back(angle);
           }
 

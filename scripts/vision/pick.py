@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """视觉引导抓取：拍照 -> 检测物料 -> 基座坐标 -> 加夹爪偏移 -> 下降/闭合/抬起。
 
-用法（在 vision/ 目录下，用 .venv_astra 的 Python 3.12）:
+用法（系统 python3 / 视觉 venv 均可，只要装了 numpy + opencv）:
 
-    .venv_astra/bin/python scripts/vision_pick.py --dry-run      # 只算目标点，不动机械臂
-    .venv_astra/bin/python scripts/vision_pick.py                # 真抓（弹窗点选目标）
-    .venv_astra/bin/python scripts/vision_pick.py --auto         # 不点选，自动识别蓝色
-    .venv_astra/bin/python scripts/vision_pick.py --tag p2       # 抓完给这次记录打标签
-    .venv_astra/bin/python scripts/vision_pick.py --dz -0.004    # 抓取高度微调 -4mm
+    python3 scripts/vision/pick.py --dry-run      # 只算目标点，不动机械臂
+    python3 scripts/vision/pick.py                # 真抓（弹窗点选目标）
+    python3 scripts/vision/pick.py --auto         # 不点选，自动识别蓝色
+    python3 scripts/vision/pick.py --tag p2       # 抓完给这次记录打标签
+    python3 scripts/vision/pick.py --dz -0.004    # 抓取高度微调 -4mm
 
 为什么用 subprocess 调 roarm_cli.py 而不直接 import rclpy:
     vision 的 venv 是 Python 3.12，把 rclpy 装进 venv 容易和系统 ROS 的
@@ -32,9 +32,16 @@ import subprocess
 import sys
 import time
 
+HERE = os.path.dirname(os.path.abspath(__file__))   # scripts/vision/
+SCRIPTS = os.path.dirname(HERE)                     # scripts/
+ROOT = os.path.dirname(SCRIPTS)                     # 项目根
+if SCRIPTS not in sys.path:
+    sys.path.insert(0, SCRIPTS)
+
 import numpy as np
 import cv2
 
+from roarm_lib import params
 from camera import find_camera_index as find_astra_color_index, grab_frame, load_scene_z
 from project import pixel_to_base as _pixel_to_base_impl
 
@@ -48,9 +55,6 @@ def pixel_to_base(u, v, T_base_cam, K, dist, z_plane):
     """
     return _pixel_to_base_impl(u, v, K, dist, T_base_cam, z_plane)
 
-HERE = os.path.dirname(os.path.abspath(__file__))   # scripts/vision/
-SCRIPTS = os.path.dirname(HERE)                     # scripts/
-ROOT = os.path.dirname(SCRIPTS)                     # 项目根
 DATA = os.path.join(ROOT, "data", "vision")
 WS_SETUP = os.path.join(ROOT, "star-arm-moveit2", "install", "setup.bash")
 CLI = os.path.join(ROOT, "scripts", "roarm_cli.py")
@@ -65,6 +69,44 @@ PROBE_CSV = os.path.join(DATA, "probe_points.csv")
 #: 免得没给参数时 cv2.imwrite(None, ...) 崩在最后一步。
 PREVIEW_DIR = os.path.join(DATA, "preview")
 
+# ---------------------------------------------------------------- 计时
+# 阶段 0：把一条指令的时间拆分写进 data/vision/timing.jsonl，供后续优化排序。
+# 只记录，不改变任何动作逻辑；文件是运行产物，已进 .gitignore。
+TIMING_JSONL = os.path.join(DATA, "timing.jsonl")
+_T_START = time.perf_counter()
+_TIMINGS = []
+_MODE = "unknown"
+
+
+def record(name, seconds):
+    """记录一个阶段耗时，并在终端打一行。"""
+    if os.environ.get("ROARM_TIMING", "1") == "0":
+        return
+    _TIMINGS.append((name, float(seconds)))
+    print("  [time] %-24s %6.2f s" % (name, seconds))
+
+
+def set_timing_mode(mode):
+    global _MODE
+    _MODE = mode
+
+
+def dump_timings():
+    if not _TIMINGS:
+        return
+    total = time.perf_counter() - _T_START
+    row = {"ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+           "source": "pick", "mode": _MODE, "total_s": round(total, 3),
+           "steps": [{"name": n, "s": round(s, 3)} for n, s in _TIMINGS]}
+    try:
+        with open(TIMING_JSONL, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception as exc:                            # noqa: BLE001
+        print("⚠ timing 写入失败：%s" % exc)
+    top = sorted(_TIMINGS, key=lambda x: -x[1])[:6]
+    print("\n[time] 总耗时 %.2f s；最大项：%s"
+          % (total, "、".join("%s %.1fs" % (n, s) for n, s in top)))
+
 
 def save_preview(img, name="pick_view.png"):
     os.makedirs(PREVIEW_DIR, exist_ok=True)
@@ -74,17 +116,14 @@ def save_preview(img, name="pick_view.png"):
     return path
 PROBE_HEADER = ["ts", "obj_x", "obj_y", "dx", "dy", "act_x", "act_y"]
 
-#: 默认末端姿态（world -> link6，零位实测），与 roarm_cli.py 保持一致
-DEFAULT_QUAT = (0.5, -0.5, 0.5, -0.5)
+#: 默认末端姿态（world -> link6，零位实测），与 roarm_cli.py 共用 config。
+DEFAULT_QUAT = params.DEFAULT_QUAT
 
-#: 单次成功抓取反推的夹爪偏移（夹爪系，mm）。有 grasp_offset.json 时以文件为准。
-DEFAULT_OFFSET_MM = (16.6, 23.6, 86.2)
+#: 夹爪偏移兜底（夹爪系，mm）。有 grasp_offset.json 时以文件为准。
+DEFAULT_OFFSET_MM = params.GRASP_OFFSET_DEFAULT_MM
 
-#: roarm_cli.py 里的任务工作区（米），不是机械极限
-#: x 上限 0.670 来自实测（probe_reach.py，z=0.200 固定抓取姿态可到 0.685）
-#: y 取 [-0.400, +0.350]：覆盖相机横向视野（物料 y 约 -430~+377），
-#: 且两端都实测可达 —— 目标是"看得见就能抓"，不再有软件侧的额外收缩。
-BOUNDS = {"x": (0.278, 0.670), "y": (-0.400, 0.350), "z": (0.074, 0.438)}
+#: 视觉可达包络（米），来自 probe_reach.py 实测；不是 roarm_cli 的任务工作区。
+BOUNDS = params.REACH_BOUNDS
 
 #: roarm_cli.py 的「任务工作区」，比上面 BOUNDS 窄（上位机作者划的旧推荐区）。
 #: 超出它，roarm_cli 会打印「拒绝：目标超出任务工作区」并退出 —— 命令静默
@@ -93,19 +132,15 @@ BOUNDS = {"x": (0.278, 0.670), "y": (-0.400, 0.350), "z": (0.074, 0.438)}
 #: 一路「z=读不到」，最后被误判成「没抬起来」。
 #: pick.py 的 BOUNDS 是 probe_reach.py 实测可达，越旧推荐区 != 撞限位，
 #: 所以统一在 cli_pose 里自动补 --force，让整轮命令一致执行。
-CLI_BOUNDS = {"x": (0.278, 0.529), "y": (-0.324, 0.113), "z": (0.074, 0.438)}
+CLI_BOUNDS = params.BOUNDS
 
 #: 命令端 z 补偿（米）。
-#: 2026-10-26 19:14 实测（空载、悬停）：命令 0.114 / 0.200 / 0.300，落在
-#: 0.101 / 0.186 / 0.286 —— 低 13~14mm，先补了 +0.014。
-#: 20:47 带负载实际抓放后回看：预抓取意图 130 → 实际 145（高 15），
-#: 投放下落意图 91 → 实际 103（高 12）。也就是 +14 补过头了，**整体再降 15**。
-#: 所以现值 = 0.014 - 0.015 = -0.001。
-#: ⚠ 这个偏差**不是常数**：今天采集 26 个位姿，误差从 -1 到 -25 都有，
-#: 随姿态变。常数只能压住当前工作区，换姿态还会差几毫米。
+#: 历史值 0.014 - 0.015 = -0.001；2026-11-03 曾按实抓再降到 -0.006。
+#: 2026-11-04 队友重标后同步回 -0.001，当前值来自 config/vision.json。
+#: ⚠ 这个偏差**不是常数**：随姿态变，常数只能压住当前工作区。
 #: 用 --z-offset-mm 可改，--no-z-offset 归零。
 #: 注意：只补"发出去的 z"；z_grasp 参与射线-平面求交，不能拿它来补。
-Z_CMD_OFFSET_M = -0.001
+Z_CMD_OFFSET_M = params.Z_CMD_OFFSET_M
 
 #: 物料到基座的水平距离合理范围（米）。背景里的蓝色物体算出来动辄几米，
 #: 用它挡掉；2026-10-21 实际踩到：背景蓝色托盘算出 10.8 米。
@@ -131,14 +166,18 @@ def load_offset():
         try:
             d = json.load(open(OFFSET_JSON, encoding="utf8"))
             off = np.array(d["offset_mm"], dtype=np.float64)
-            return off, "grasp_offset.json (n=%s)" % d.get("n", "?")
+            n = d.get("n", "?")
+            warn = "，⚠ n=0 未统计标定" if str(n) == "0" else ""
+            return off, "grasp_offset.json (n=%s)%s" % (n, warn)
         except Exception as e:
             print("⚠ grasp_offset.json 读不出来(%s)，改用默认值" % e)
     return np.array(DEFAULT_OFFSET_MM, dtype=np.float64), "默认值(单次抓取反推)"
 
 
-def load_object_height(default=0.070):
-    """从 scene_real.yaml 读物料高度（米），读不到就用 70mm。"""
+def load_object_height(default=None):
+    """从 scene_real.yaml 读物料高度（米），读不到就用 config/vision.json 的默认值。"""
+    if default is None:
+        default = params.OBJECT_HEIGHT_DEFAULT_M
     try:
         for line in open(SCENE_YAML, encoding="utf8"):
             s = line.strip()
@@ -218,22 +257,27 @@ def out_of_bounds(xyz):
     return bad
 
 
-#: 颜色 HSV 范围（OpenCV 的 H 是 0~179，不是 0~360）。红跨 0 度，要两段拼。
-COLOR_RANGES = {
-    "red":    [((0, 120, 60), (10, 255, 255)),
-               ((170, 120, 60), (179, 255, 255))],
-    "green":  [((40, 80, 50), (85, 255, 255))],
-    "blue":   [((100, 120, 60), (130, 255, 255))],
-    "yellow": [((20, 120, 60), (35, 255, 255))],
-}
+#: HSV 阈值来自 config/vision.json（material / tray）。
+#: 光照变化时改配置，不要在这里加第二份。
+COLOR_RANGES = params.COLOR_RANGES
+TRAY_RANGES = params.TRAY_RANGES
+MASK_TRAY_COLORS = params.MASK_TRAY_COLORS
 
 
-def color_candidates(img, color="blue", min_area=500.0):
-    """画面里指定颜色的所有块，返回 [(uv, area), ...]（面积从大到小）。
+def color_candidates(img, color="blue", min_area=500.0, exclude_trays=True,
+                     with_shape=False):
+    """画面里指定颜色的所有物料块，返回 ([(uv, area[, aspect, solidity]), ...], mask)。
 
     为什么不用 grasp_xy.detect_blue：它只返回"最大的那块"，
     背景里一块同色托盘就能把真正的小物料挤掉（2026-10-21 踩到）。
     这里把所有候选都交出来，交给物理距离再筛。
+
+    exclude_trays=True 时先减掉同色托盘 HSV 掩码（config/vision.json 的
+    colors.<name>.tray）。绿色物料和托盘 HSV 有重叠，默认由 colors.mask_tray
+    关闭，改用面积/形态筛。
+
+    with_shape=True 时额外返回 (aspect=w/h, solidity=area/convexHull)：
+    圆柱物料通常 aspect<1、solidity 高；平铺托盘/背景布 aspect>1、solidity 低。
     """
     if color not in COLOR_RANGES:
         raise ValueError("未知颜色 %r，支持 %s" % (color, list(COLOR_RANGES)))
@@ -242,6 +286,14 @@ def color_candidates(img, color="blue", min_area=500.0):
     for lo, hi in COLOR_RANGES[color]:
         m = cv2.inRange(hsv, np.array(lo), np.array(hi))
         mask = m if mask is None else cv2.bitwise_or(mask, m)
+    if mask is None:
+        mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+    if exclude_trays and color in MASK_TRAY_COLORS and TRAY_RANGES.get(color):
+        tray = np.zeros(hsv.shape[:2], dtype=np.uint8)
+        for lo, hi in TRAY_RANGES[color]:
+            tray = cv2.bitwise_or(
+                tray, cv2.inRange(hsv, np.array(lo), np.array(hi)))
+        mask = cv2.bitwise_and(mask, cv2.bitwise_not(tray))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -253,14 +305,21 @@ def color_candidates(img, color="blue", min_area=500.0):
         m = cv2.moments(c)
         if m["m00"] == 0:
             continue
-        out.append(((m["m10"] / m["m00"], m["m01"] / m["m00"]), a))
+        uv = (m["m10"] / m["m00"], m["m01"] / m["m00"])
+        if with_shape:
+            _x, _y, w, h = cv2.boundingRect(c)
+            hull = cv2.convexHull(c)
+            sol = a / max(cv2.contourArea(hull), 1.0)
+            out.append((uv, a, w / max(h, 1), sol))
+        else:
+            out.append((uv, a))
     out.sort(key=lambda t: -t[1])
     return out, mask
 
 
-def blue_candidates(img, min_area=500.0):
+def blue_candidates(img, min_area=500.0, exclude_trays=True):
     """兼容旧调用（calib_xy 用它找蓝色探针）——内部走 color_candidates。"""
-    return color_candidates(img, "blue", min_area)
+    return color_candidates(img, "blue", min_area, exclude_trays)
 
 
 # ---------------------------------------------------------------- 中断处理
@@ -269,9 +328,9 @@ _ABORT_HINT = (
     "\n⚠ 已取消当前动作，舵机会保持当前角度 —— 机械臂不会立刻掉下来。\n"
     "   接着会自动【收爪 + 回 home】（2026-11-01 起），不用手动收拾。\n"
     "   · 想让它立刻停住别动 → 在回 home 过程中再按一次 Ctrl+C\n"
-    "   · 如果臂已经在抖 / 瘫软 → 先托住它，再跑：\n"
-    "     cd ~/brain/ssvep-bci-arm-main/ssvep-bci-arm-main\n"
-    "     bash scripts/robot_recover.sh\n"
+    "   · 如果臂已经在抖 / 瘫软 → 先托住它，再检查串口与供电：\n"
+    "     python3 scripts/servo_check.py\n"
+    "     bash scripts/robot_up.sh --stop   # 必要时先停掉全部节点\n"
 )
 
 
@@ -325,11 +384,16 @@ def run_cli(args, timeout=45):
     # 用 Popen 而不是 run：机械臂走一条轨迹要 1~3 秒，这段时间主线程本来是
     # 空等。改成轮询 stdout 的同时刷新画面，就能做到"动作期间画面也在动"，
     # 而且 imshow 全在主线程（后台线程 imshow 会把这套 OpenCV 后端搞崩）。
+    _t_cli = time.perf_counter()
+    _op = str(args[0]) if args else "?"
+    if _op == "grip" and len(args) > 1:
+        _op = "grip_" + str(args[1])
     try:
         p = subprocess.Popen(["bash", "-c", inner],
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              text=True, bufsize=1)
     except Exception as e:
+        record("cli:" + _op, time.perf_counter() - _t_cli)
         return 1, "启动子进程失败：%s" % e
 
     lines, timed_out, t0 = [], False, time.time()
@@ -366,9 +430,12 @@ def run_cli(args, timeout=45):
         p.wait()
 
     if _ABORT["flag"]:
+        record("cli:" + _op, time.perf_counter() - _t_cli)
         return 130, "用户中断（Ctrl+C）"
     if timed_out:
+        record("cli:" + _op, time.perf_counter() - _t_cli)
         return 124, "子进程超时 %ss" % timeout
+    record("cli:" + _op, time.perf_counter() - _t_cli)
     return p.returncode, "".join(lines).strip()
 
 
@@ -439,9 +506,10 @@ def cli_pose(xyz_mm, wait, tol, force, allow_far=False, retries=2, settle=True):
     因为标定用的 act_x/y/z 来自它。
     """
     x, y, z = (v / 1000.0 for v in xyz_mm)
-    # 臂每次都停在比命令低 13~14mm 的地方（见 Z_CMD_OFFSET_M）。这里补在
-    # **发出去的值**上：act 读回来的是真机位置，跟调用方传进来的目标仍是同一
-    # 个尺度，所以调用方的误差比较、move_z_compensated 的判据都不受影响。
+    # 臂的 z 落点相对命令值有系统偏差，随姿态漂移；当前按队友 2026-11-04
+    # 标定取 -1mm（config/vision.json）。这里补在**发出去的值**上：act 读回来
+    # 的是真机位置，跟调用方传进来的目标仍是同一个尺度，所以调用方的误差
+    # 比较、move_z_compensated 的判据都不受影响。
     # 工作区 BOUNDS 是按"意图"标的，所以边界检查仍用未补偿的 z。
     z_send = z + Z_CMD_OFFSET_M
     # 四元数必须写在 --wait/--tol 前面：roarm_cli 的位置参数是 nargs="*"，
@@ -527,7 +595,7 @@ def pull_in(point, radius_limit, min_scale=0.70):
     return np.array([p[0] * k, p[1] * k, p[2]])
 
 
-def lift_to(up_mm, args, tol=30.0):
+def lift_to(up_mm, args, tol=30.0, min_z=None):
     """抬起（垂直上移）。短 wait 先试，没起来再补一次。
 
     抬起只是"离开物料"，不需要精度，所以：
@@ -535,16 +603,21 @@ def lift_to(up_mm, args, tol=30.0):
       · retries=0，不走分段逼近（那段会从当前位置重规划，带物时更慢）；
       · 第一次只用 25 秒的 wait —— 之前用 90 秒，一旦规划卡住就要干等
         两分多钟，用户看到的就是"卡住不动"。
-    只有确实没抬起来（z 还比目标低 25mm 以上）才补发一次，且这次给足 wait。
+
+    `min_z`：调用方要求的最低离地高度。第一次就达到它时不再补发，
+    避免为一个已经够用的高度再发一条命令、白等 25~45 s。
+    只有确实没抬起来（低于 min_z，或未指定时低于目标 25mm）才补发一次。
     """
     rc, act = cli_pose(up_mm, min(args.wait, 25.0), tol, not args.no_force,
                        args.allow_far, retries=0, settle=False)
     if rc == 130:                       # Ctrl+C：不再补发
         return 130, None
     z = None if act is None else act[2]
-    if z is None or z < up_mm[2] - 25.0:
-        print("  ⚠ 没抬到位（z=%s，目标 %.0f），补发一次"
-              % ("?" if z is None else "%.0f" % z, up_mm[2]))
+    retry_below = min_z if min_z is not None else up_mm[2] - 25.0
+    if z is not None and z >= retry_below:
+        return rc, act
+    print("  ⚠ 没抬到位（z=%s，目标 %.0f），补发一次"
+          % ("?" if z is None else "%.0f" % z, up_mm[2]))
     rc, act = cli_pose(up_mm, min(args.wait, 45.0), tol + 10.0,
                        not args.no_force, args.allow_far,
                        retries=0, settle=False)
@@ -570,14 +643,15 @@ def cli_pose_zfix(target, wait, tol, force, allow_far=False, iters=1,
     也就是"每次都很稳地停在错的地方"。量一次偏差、把目标反着挪一点再发一次，
     落点能进 ±5mm。
 
-    up=False（默认，抓取段用）：只补「偏高」（臂比目标高，往下压）。偏低不补 ——
-      抓取时指尖更低照样能夹，且历史上「往上抬的短移动会卡满 90 秒」
-      （2026-10-23）。那个"卡住"其实是逐点下发互相覆盖（2026-11-03 已修），
-      但抓取段保持保守。
-    up=True（投放段用）：偏低也补。投放落点偏低会把物料按在桌面上 ——
+    up=False（默认，保守模式）：只补「偏高」（臂比目标高，往下压）。偏低不补 ——
+      历史上「往上抬的短移动会卡满 90 秒」（2026-10-23）；根因是逐点下发
+      互相覆盖，2026-11-03 已修，但此模式保留给伸展位形/调试。
+      当前 pick.py 的抓取下降已改用 up=True：绝对误差是双向的，偏低会让
+      夹爪扎进物料/台面。
+    up=True：偏低也补。投放落点偏低会把物料按在桌面上 ——
       2026-11-03 日志：投放高度 72 -> 实际 59，桌面 57.6，只差 1.4mm。
       ⚠ 风险：伸展位形（半径 600mm 以上）**带载垂直抬不动**，补发那一步可能
-        白等。护栏：短 wait 25s 兜底 + max_step 8mm 限幅 + 补偿后更远立即停。
+        白等。护栏：短 wait 10s 兜底 + max_step 8mm 限幅 + 补偿后更远立即停。
         真机若发现这一步卡住，用 --no-zfix 关掉整段补偿（回到旧行为）。
 
     安全约束（2026-10-21 踩到才加的）：
@@ -589,10 +663,11 @@ def cli_pose_zfix(target, wait, tol, force, allow_far=False, iters=1,
     rc, act = cli_pose(target, wait, tol, force, allow_far)
     if act is None:
         return rc, None
-    # 补发用短 wait：历史上「往上抬的短移动会卡满 90 秒」（2026-10-23），
-    # 真正原因是逐点下发互相覆盖（2026-11-03 已修），但留个 25 秒兜底，
-    # 万一再卡也不至于干等两分钟。
-    fix_wait = min(wait, 25.0)
+    # 补发用短 wait：8 mm 的修正正常 2~3 s 就走完；超过 5 s 还没到，
+    # 多半是伸展位形抬不动/规划卡住，继续等只会让用户以为程序死机。
+    # 2026-11-05 实测：place_descend 里一次补发吃满 10s（总 16s），
+    # 把上限从 10s 压到 5s；仍保留足够时间走完 8mm 修正。
+    fix_wait = min(wait, 5.0)
     for i in range(iters):
         # dz = 目标 - 实测。dz < 0 表示臂比目标"高"（要往下压），dz > 0 偏低。
         dz = target[2] - act[2]
@@ -625,6 +700,26 @@ def cli_grip(cmd, wait, tol=5.0):
                       timeout=wait + 15)
     show(out)
     return rc, parse_err(out)
+
+
+def grasp_closed_ok(rc, err):
+    """闭合后是否判定夹住。
+
+    rc=0 表示夹爪走到闭合目标（空夹）；被物料挡住时 rc=1、误差 2~22mm。
+    err<2 视为太薄/空夹；err>22 视为没夹进指间。与旧逻辑保持一致。
+    """
+    return rc not in (0, None) and err is not None and 2.0 <= err <= 22.0
+
+
+def offset_after_measurement(off_mm, R, dx_meas, dy_meas):
+    """由「指尖中心 - 物料中心」的基座 x/y 偏差计算新的夹爪偏移。
+
+    off_mm 是旧偏移（夹爪局部系），R 是局部→世界的旋转。
+    dx/dy 是实测误差（指尖减物料）；目标要朝反方向修正，再转回局部系。
+    返回 (新偏移, 世界系修正量)。
+    """
+    corr = np.array([-dx_meas, -dy_meas, 0.0], dtype=np.float64)
+    return np.asarray(off_mm, dtype=np.float64) + R.T @ corr, corr
 
 
 # ---------------------------------------------------------------- 记录
@@ -971,8 +1066,8 @@ def main():
                     help="到位容差（毫米）。机械臂绝对定位本身 10~30mm，"
                          "设 5 会一直判失败；预抓取/抬起用 15 够，抓取点可单独收紧")
     ap.add_argument("--no-show", action="store_true",
-                    help="不开画面窗口（只跑流程）；点选模式下必须有窗口，"
-                         "要么去掉它，要么用 --u/--v 直接给像素")
+                    help="不开画面窗口（只跑流程）；无窗口且未给 --u/--v 时"
+                         "自动走颜色识别。点选模式必须有窗口。")
     ap.add_argument("--wait", type=float, default=90.0,
                     help="每个位姿最长等待（秒）。臂慢的时候别设小，超时会主动取消轨迹，"
                          "等于半路停车（2026-10-23 踩过：30s 只走了 100mm）")
@@ -983,6 +1078,11 @@ def main():
     ap.add_argument("--no-lift", action="store_true", help="闭合后不要抬起来")
     ap.add_argument("--probe", action="store_true",
                     help="只移到物料上方悬停、不下降不闭合，方便用眼睛量偏差")
+    ap.add_argument("--measure-offset", action="store_true",
+                    help="停在预抓取点（x/y 按当前偏移移动，z 在物料上方），"
+                         "输入实测指尖-物料 x/y 偏差，计算新的夹爪偏移；不下降不夹取")
+    ap.add_argument("--save-offset", action="store_true",
+                    help="配合 --measure-offset：把计算结果写回 grasp_offset.json")
     ap.add_argument("--probe-lift", type=float, default=40.0,
                     help="--probe 时停在抓取点上方多少 mm，默认 40")
     ap.add_argument("--dxy", type=float, nargs=2, metavar=("DX", "DY"),
@@ -992,7 +1092,21 @@ def main():
     ap.add_argument("--click", dest="click", action="store_true", default=True,
                     help="弹窗左键点选物料（**默认**）；点哪算哪，不受蓝色阈值/背景干扰")
     ap.add_argument("--auto", dest="click", action="store_false",
-                    help="不弹窗，自动识别蓝色区域（原来那套）")
+                    help="不弹窗，自动识别指定颜色（原来那套）")
+    ap.add_argument("--no-tray-mask", action="store_true",
+                    help="自动识别时不减掉同色托盘 HSV 掩码（默认按 colors.mask_tray）")
+    ap.add_argument("--snap-color", action="store_true",
+                    help="点选后吸附到最近的 --color 颜色块几何中心，"
+                         "减小手点落在顶面/边缘的误差")
+    ap.add_argument("--snap-radius-px", type=float, default=80.0,
+                    help="--snap-color 时允许的最大吸附距离（像素），默认 80")
+    ap.add_argument("--max-area", type=float, default=params.MAX_AREA_PX,
+                    metavar="PX",
+                    help="自动识别时忽略面积超过该值的候选（默认 %.0f，"
+                         "用于排除大片托盘；0=不限制）" % params.MAX_AREA_PX)
+    ap.add_argument("--no-tall", action="store_true",
+                    help="自动识别时不优先选高而实心的候选（默认优先，"
+                         "用于区分圆柱物料和扁平托盘/背景布）")
     ap.add_argument("--place", choices=("swap", "origin"), default="swap",
                     help="抓完放哪：swap=左→右/右→左/中间随机（默认），origin=放回原处")
     ap.add_argument("--auto-place", action="store_true",
@@ -1067,9 +1181,18 @@ def main():
     ap.add_argument("--no-force", action="store_true", help="目标超工作区时不自动加 --force")
     ap.add_argument("--allow-far", action="store_true",
                     help="允许 x/y 超出任务工作区（默认拒绝，防止臂去撞限位）")
+    ap.add_argument("--max-reach-mm", type=float,
+                    default=params.MAX_PICK_RADIUS_MM,
+                    help="抓取点距底座的软上限（毫米），默认 %.0f。"
+                         "这是经验值，不是机械极限；超过需 --allow-far"
+                         % params.MAX_PICK_RADIUS_MM)
+    ap.add_argument("--no-x-comp", action="store_true",
+                    help="关闭远端 x 的 +20/-8 经验补偿（换爪或手动核对后用）")
     ap.add_argument("--image", default=None,
                     help="叠加结果图保存路径")
     args = ap.parse_args()
+    atexit.register(dump_timings)
+    set_timing_mode("place" if args.place_only else "pick")
     install_sigint()        # Ctrl+C = 取消当前动作 + 保持位置，不是直接退出
     global VERBOSE, QUIET
     VERBOSE = bool(getattr(args, "verbose", False))
@@ -1083,6 +1206,7 @@ def main():
 
     # ---- 0) 相机 + 画面窗口（单窗口、主线程刷新、相机全程常开）
     global PEEK
+    _t_cam = time.perf_counter()
     # --place-only 用不到相机（物料就在爪里，投放点由像素参数给定）。
     # 更关键的是：这时候相机正被 cap/vision_arm_color.py 拿着，
     # 硬开只会抢失败。所以这一支不走 LiveCam，把它置 None。
@@ -1105,10 +1229,18 @@ def main():
         if lv.on:
             lv.set_status("[0/7] idle")
             print("实时画面已开启（窗口 vision_pick，动作期间也持续刷新）")
-    # 离线读图时没有窗口，不能点选：直接走自动检测（或 --u/--v）
-    click_mode = args.click and args.u is None and not args.from_file
+    record("camera_init", time.perf_counter() - _t_cam)
+    # 离线读图或 --no-show（无窗口）时不能点选：直接走自动颜色识别。
+    # BCI 的 arm_sink 就是这样调的：pick.py --color red --no-show，
+    # 不传 --auto 也应该能工作。
+    click_mode = (args.click and args.u is None and not args.from_file
+                  and not args.no_show)
+    if (args.click and args.u is None and not args.from_file
+            and args.no_show):
+        print("--no-show：无窗口，自动走颜色识别（等价 --auto）")
 
     # ---- 1) 标定参数
+    _t_calib = time.perf_counter()
     d = np.load(os.path.join(DATA, "T_base_cam.npz"))
     T_base_cam = d["T_base_cam"]
     Kd = np.load(os.path.join(DATA, "cam_intrinsics.npz"))
@@ -1135,6 +1267,7 @@ def main():
         off_src += " +dxy(%+.0f,%+.0f)" % (dx, dy)
     R = quat_to_R(DEFAULT_QUAT)
     xy_corr = load_xy_correction()      # 米尺线性修正，没有就是 None
+    record("calib_load", time.perf_counter() - _t_calib)
     # 点选投放的固定微调（物料坐标 mm）：优先 --place-dxy，其次读 json 里的
     # place_dx_mm / place_dy_mm。抓取准但投放整体偏一点时用它补，别去改 XY 修正
     # （那个一改会把抓取带跑）。
@@ -1246,12 +1379,26 @@ def main():
         if place_dz:
             pl6 = np.array([pl6[0], pl6[1], pl6[2] + place_dz])
             print("  投放高度微调 %+.1f mm → link6 z=%.1f mm" % (place_dz, pl6[2]))
+        # 把"点选位置"和"实际目标"的差说清楚：place_dxy 会自动作用于
+        # 点选/外部给像素的投放点，用户看到物料落点偏移 15mm 时，
+        # 先确认不是这个微调在起作用。
+        if manual_slot is not None and np.any(place_dxy):
+            print("  投放微调 %+.1f/%+.1f mm 已应用：点选物料坐标 → 目标物料坐标 "
+                  "(%+.0f, %+.0f) mm"
+                  % (place_dxy[0], place_dxy[1],
+                     pl6[0] - d_loc[0], pl6[1] - d_loc[1]))
         # 投放点的半径检查（2026-11-01）：650 → **670**。
         # 原来卡 650 是因为"松爪后原地垂直抬起"在伸展位形抬不动（633 卡死两次）。
         # 现在那段已经改成「先直上 25mm 脱离物料 → 再按 pull_in 斜着往回收」，
         # 和 [5/7] 抬起同一套办法，所以远一点也能起来。
         # 上限取 670：整臂全伸展约 685，留 15mm 余量给 FK 误差。
         # 抓取那条线仍是 650 —— 抓取要"下降+夹+带物抬升"，比投放吃力。
+        _out_y = not (CLI_BOUNDS["y"][0] <= pl6[1] <= CLI_BOUNDS["y"][1])
+        _out_x = not (CLI_BOUNDS["x"][0] <= pl6[0] <= CLI_BOUNDS["x"][1])
+        if _out_x or _out_y:
+            print("  提示：投放点在 CLI 推荐区外（x=%+.0f, y=%+.0f mm）。"
+                  "臂会更伸展，规划和起落明显更慢；如非必要，把投放区往中间挪。"
+                  % (pl6[0], pl6[1]))
         _rad = float(np.hypot(pl6[0], pl6[1]))
         if _rad > 670.0 and not args.allow_far:
             print("  ⛔ 投放点在 %.0f mm 处，超过可控范围（670mm），不硬放。"
@@ -1280,13 +1427,17 @@ def main():
             # 垂直抬不动，往底座方向收一点才能起来。见 pull_in()。
             _up = pull_in(np.array([float(from_point[0]), float(from_point[1]),
                                     travel_z]), args.lift_pull_r)
+            _t = time.perf_counter()
             cli_pose(_up,
                      args.wait, max(args.tol, 22.0), not args.no_force,
                      args.allow_far, settle=False)
+            record("place_lift_travel", time.perf_counter() - _t)
         # 再在**这个高度**平移到投放点正上方，最后垂直下落
         hover = np.array([pl6[0], pl6[1], travel_z])
+        _t = time.perf_counter()
         rc, act_h = cli_pose(hover, args.wait, max(args.tol, 22.0),
                              not args.no_force, args.allow_far, settle=False)
+        record("place_hover", time.perf_counter() - _t)
         if rc != 130 and act_h is not None:
             # 平移到不到位（这台臂在伸展姿态常差 10~20mm），下面那段"垂直下落"
             # 就会变成斜着落，物料落地偏一截。好在悬停高度离台面还有 60mm，
@@ -1299,10 +1450,13 @@ def main():
                 fix = np.array([hover[0] + ex, hover[1] + ey, hover[2]])
                 print("  悬停落点差 (%+.0f, %+.0f) mm，在悬停高度补一次再下落"
                       % (act_h[0] - hover[0], act_h[1] - hover[1]))
+                _t = time.perf_counter()
                 cli_pose(fix, args.wait, max(args.tol, 22.0), not args.no_force,
                          args.allow_far, settle=False)
+                record("place_fix", time.perf_counter() - _t)
         # 下落这一段必须量高度：臂在伸展姿态常比目标高 10~15mm，直接从高处松爪
         # 物料会砸下去弹跳/歪掉（只补"偏高"这一侧，偏低不动，免得压进桌面）。
+        _t = time.perf_counter()
         if args.no_zfix:
             rc, act_b = cli_pose(pl6, args.wait, args.tol, not args.no_force,
                                  args.allow_far, settle=False)
@@ -1312,10 +1466,13 @@ def main():
             # 若该点位在伸展区、带载抬不动，用 --no-zfix 关掉整段补偿。
             rc, act_b = cli_pose_zfix(pl6, args.wait, args.tol, not args.no_force,
                                       args.allow_far, up=True)
+        record("place_descend", time.perf_counter() - _t)
         if act_b is None:
             print("  ⚠ 降不到放置高度，物料还在夹爪里，请手动处理（或 --no-place）")
             return 1
+        _t = time.perf_counter()
         cli_grip("open", 15)
+        record("place_grip_open", time.perf_counter() - _t)
         print("  已松爪，物料落在%s（物料坐标 %+.0f, %+.0f mm）"
               % (where, pl6[0] - d_loc[0], pl6[1] - d_loc[1]))
         if act_b is not None:
@@ -1335,7 +1492,13 @@ def main():
         #   ② 再按 pull_in 往底座方向收着往上（和 [5/7] 抬起同一个办法）
         # ① 先垂直脱离 25mm（两指还在物料两侧，此时横向走会把它带倒）
         _lift0 = np.array([pl6[0], pl6[1], min(travel_z, pl6[2] + 25.0)])
-        rc_l0, act_l0 = lift_to(_lift0, args, tol=max(args.tol, 22.0))
+        # 只要比投放高度高 20mm 就够脱离物料；达到后不再为一个更高的
+        # travel_z 白等一轮（放置后"停滞很久"的主要来源之一）。
+        clear_z = float(pl6[2] + 20.0)
+        _t = time.perf_counter()
+        rc_l0, act_l0 = lift_to(_lift0, args, tol=max(args.tol, 22.0),
+                                min_z=clear_z)
+        record("place_clear", time.perf_counter() - _t)
         if rc_l0 == 130:
             return bail("松爪后脱离")
         # ② 再斜着收上去到 travel_z
@@ -1343,7 +1506,10 @@ def main():
         if abs(lift[0] - pl6[0]) + abs(lift[1] - pl6[1]) > 3.0:
             print("  伸展位形（半径 %.0fmm）→ 松爪后斜着往回收再抬升到 z=%.0f"
                   % (float(np.hypot(pl6[0], pl6[1])), travel_z))
-        rc_l, act_l = lift_to(lift, args, tol=max(args.tol, 22.0))
+        _t = time.perf_counter()
+        rc_l, act_l = lift_to(lift, args, tol=max(args.tol, 22.0),
+                              min_z=clear_z)
+        record("place_lift", time.perf_counter() - _t)
         if rc_l == 130:
             return bail("松爪后抬升")
 
@@ -1358,7 +1524,9 @@ def main():
                   % ("读不到" if got_z is None else "%.0f" % got_z, pl6[2]))
             print("    保持张爪回 home —— 现在收爪会夹住刚放下的物料。"
                   "下次可加 --place-lift 130 让它抬更高再横移。")
+        _t = time.perf_counter()
         go_home(close_grip=lifted)
+        record("place_go_home", time.perf_counter() - _t)
         return 0
 
     # ---- 1.5) --place-only：物料已经在爪里，直接进投放段
@@ -1381,7 +1549,9 @@ def main():
         print("  投放点：像素 (%.0f,%.0f) → 物料坐标 (%+.0f, %+.0f) mm"
               % (args.drop_u, args.drop_v, slot[0], slot[1]))
         # 此刻臂大概在哪：问一次真值，拿不到就用 home 高度兜底
+        _t_pose = time.perf_counter()
         cur_pose = read_pose()
+        record("place_read_pose", time.perf_counter() - _t_pose)
         if cur_pose is None:
             print("  ⚠ 读不到当前位姿，按 home 高度估一个")
             cur_pose = np.array([479.0, 0.0, 369.0])
@@ -1405,14 +1575,17 @@ def main():
         # ⚠ 别写 --close-grip —— roarm_cli 没有这个参数，传了会 argparse
         # 报错、整条 home 命令根本不执行（2026-11-03 日志开头那句
         # "unrecognized arguments: --close-grip"，还被当成"臂有固定偏差"糊弄过去）。
+        _t_home = time.perf_counter()
         cli_grip("close", 4)
         rc, out = run_cli(["home", "--wait", "%.1f" % args.wait, "--tol", "40.0"],
                           timeout=args.wait + 25)
         show(out)
+        record("pick_home", time.perf_counter() - _t_home)
         if rc != 0:
             print("  ⚠ home 没进 25mm（臂有固定偏差属正常），继续下一步")
 
     # ---- 3) 拍照 + 检测
+    _t_img = time.perf_counter()
     if args.from_file:
         print("读图…", args.from_file)
         img = cv2.imread(args.from_file)
@@ -1428,6 +1601,7 @@ def main():
         except SystemExit as e:
             print("❌ %s" % e)
             return 1
+    record("capture_frame", time.perf_counter() - _t_img)
     cands = []          # [(uv, area, P_base)]
     # 注意：--click 现在是默认行为，但显式给了 --u/--v 时应该用像素，
     # 否则 "指定像素" 会被点选窗口抢走（click_mode 已含这个判断）。
@@ -1443,6 +1617,27 @@ def main():
             return 1
         uv = p
         area = 3000.0               # 只用于画圈，没有物理含义
+        # 点选 + 颜色质心：手的任务只是"指到哪个物体"，精确坐标取同色块质心。
+        # 这样既避免点多块物体时选错，也避免点在顶面/边缘造成的 x/y 偏移。
+        if args.snap_color:
+            raw, _ = color_candidates(
+                img, args.color, exclude_trays=not args.no_tray_mask)
+            if raw:
+                best = min(raw, key=lambda t: (
+                    (t[0][0] - p[0]) ** 2 + (t[0][1] - p[1]) ** 2))
+                d = float(np.hypot(best[0][0] - p[0], best[0][1] - p[1]))
+                if d <= args.snap_radius_px:
+                    print("点选 (%.0f,%.0f) → %s色中心 (%.0f,%.0f)（%.0f px）"
+                          % (p[0], p[1], args.color,
+                             best[0][0], best[0][1], d))
+                    uv = best[0]
+                    area = best[1]
+                else:
+                    print("附近 %.0f px 内没有%s色块，按点击像素处理"
+                          % (args.snap_radius_px, args.color))
+            else:
+                print("画面里没有%s色块，按点击像素处理（检查 --color）"
+                      % args.color)
         P = pixel_to_base(uv[0], uv[1], T_base_cam, K, dist, z_g)
         if P is None:
             print("❌ 该像素与 z=%.3f 平面没有交点（点到了地平线以上？）" % z_g)
@@ -1462,34 +1657,31 @@ def main():
             return 1
         P_mm = P * 1000.0
     else:
-        raw, _mask = color_candidates(img, args.color)
-        if not raw:
-            print("❌ 画面里没有蓝色区域（可用 --u --v 指定像素，或调颜色阈值）")
-            save_preview(img, "pick_no_blue.png")
+        from color_detect import find_targets_adaptive
+        _t_detect = time.perf_counter()
+        calib = {"T": T_base_cam, "K": K, "dist": dist}
+        shape_kw = {}
+        if args.no_tall:
+            # 兼容旧参数：关闭“立着”/宽高比形态判据，只保留 V均值/面积/可达范围
+            shape_kw = {"min_shape": 0.0, "aspect_range": (0.0, 99.0)}
+        found, report = find_targets_adaptive(
+            img, calib, z_g, max_area=args.max_area, **shape_kw)
+        record("color_detect", time.perf_counter() - _t_detect)
+        hit = found.get(args.color)
+        if hit is None:
+            print("❌ %s 没找到符合物料判据的候选（V均值/面积/形状/可达范围）。"
+                  % args.color)
+            for line in (report.get(args.color) or [])[-8:]:
+                print("   · " + line)
+            print("   可调 config/vision.json 的 detect，或用 --snap-color 点选。")
+            save_preview(img, "pick_no_%s.png" % args.color)
             return 1
-        print("画面里 %d 个%s色区域：" % (len(raw), args.color))
-        for uv_i, a in raw:
-            P_i = pixel_to_base(uv_i[0], uv_i[1], T_base_cam, K, dist, z_g)
-            if P_i is None:
-                print("  (%4.0f,%4.0f) 面积%6.0f  视线与平面无交点"
-                      % (uv_i[0], uv_i[1], a))
-                continue
-            r = float(np.hypot(P_i[0], P_i[1]))
-            good = R_MIN <= r <= R_MAX
-            if good:
-                cands.append((uv_i, a, P_i))
-            print("  (%4.0f,%4.0f) 面积%6.0f  基座%+7.0f,%+7.0f mm  距底座%5.0f mm  %s"
-                  % (uv_i[0], uv_i[1], a, P_i[0] * 1000, P_i[1] * 1000, r * 1000,
-                     "✓" if good else "✗ 不在 %.2f~%.2f m 内" % (R_MIN, R_MAX)))
-        if not cands:
-            print("❌ %s 色区域都不在合理距离内（%.2f~%.2f m），大概率认错东西了"
-                  % (args.color, R_MIN, R_MAX))
-            print("   物料放台面上、离底座 0.1~0.75 m；也可用 --u --v 手动指定像素")
-            save_preview(img, "pick_no_candidate.png")
-            return 1
-        uv, area, P = cands[0]
-        P_mm = P * 1000.0
-        print("选用 像素 (%.0f, %.0f)，面积 %.0f" % (uv[0], uv[1], area))
+        uv = hit["uv"]
+        area = hit["area"]
+        P_mm = np.array(hit["base"], dtype=np.float64)
+        print("颜色检测（color_detect）：uv=(%.0f,%.0f) 面积=%.0f "
+              "V均值=%.0f 基座=(%+.0f,%+.0f) mm"
+              % (uv[0], uv[1], area, hit["v_mean"], P_mm[0], P_mm[1]))
         if lv is not None:
             lv.set_target(uv, area)      # 实时窗口里直接圈出来
             lv.set_status("[1/7] target locked")
@@ -1515,12 +1707,17 @@ def main():
     # ---- 4) 夹爪偏移
     d_mm = R @ off_mm
     tgt = P_mm + d_mm
+    # 基座 y 的常数偏差补偿。2026-11-04 实抓：y 偏 +2mm → 补 -2。
+    # 换姿态/换爪后重新确认。
+    if params.GRASP_Y_BIAS_MM:
+        tgt = tgt.copy()
+        tgt[1] += params.GRASP_Y_BIAS_MM
     # 2026-11-01 实测经验：抓取点 x 超过 520mm 后，臂在伸展位形的 FK 误差
     # 变大，实际落点比命令位置偏 -20mm 左右，所以目标点补 +20。
     # 这是**位置相关**的补偿（不像 xy_correction 那样是全局线性），
     # 只在远端生效；改阈值前先确认远端抓取是不是真的偏。
     x_comp = 0.0
-    if tgt[0] > 520.0:
+    if tgt[0] > 520.0 and not args.no_x_comp:
         x_comp = 20.0
         tgt = tgt.copy()
         tgt[0] += x_comp
@@ -1529,11 +1726,16 @@ def main():
     # 用 P_mm（物料基座坐标）判断，不用 tgt —— 这是"物料在哪"的属性，
     # 跟夹爪偏移无关，换爪也不会失效。
     # 和上面的远端补偿会叠加：x=550/y=150 时 +20-8 = 净 +12。
-    if P_mm[0] > 500.0 and P_mm[1] > 130.0:
+    if P_mm[0] > 500.0 and P_mm[1] > 130.0 and not args.no_x_comp:
         x_comp -= 8.0
         tgt = tgt.copy()
         tgt[0] -= 8.0
         print("  右上象限补偿 -8.0 mm（基座 x>500 且 y>130）")
+    # 基座 x 的常数补偿，放在 520/右上象限判据**之后**，避免几毫米偏移
+    # 改变是否触发 +20mm 的阈值。2026-11-04 实抓：x 偏 +3mm → 补 -3。
+    if params.GRASP_X_BIAS_MM:
+        tgt = tgt.copy()
+        tgt[0] += params.GRASP_X_BIAS_MM
     pre_z = max(tgt[2] + args.standoff * 1000.0, args.min_pre_z * 1000.0)
     pre = np.array([tgt[0], tgt[1], pre_z])
 
@@ -1542,9 +1744,18 @@ def main():
     print("  夹爪偏移(局部) x=%+7.1f  y=%+7.1f  z=%+7.1f mm   ← %s"
           % (off_mm[0], off_mm[1], off_mm[2], off_src))
     print("  偏移(世界系)   x=%+7.1f  y=%+7.1f  z=%+7.1f mm" % tuple(d_mm))
+    if params.GRASP_Y_BIAS_MM:
+        print("  y 偏差补偿   %+.1f mm（基座系；实际落点偏大时取负）"
+              % params.GRASP_Y_BIAS_MM)
+    if params.GRASP_X_BIAS_MM:
+        print("  x 偏差补偿   %+.1f mm（基座系；实际落点偏大时取负）"
+              % params.GRASP_X_BIAS_MM)
     if x_comp:
         print("  远端 x 补偿   %+.1f mm（>520 加 20；基座右上象限再减 8）"
+              "  ← 2026-11-01 旧经验值，换爪后可用 --no-x-comp 复核"
               % x_comp)
+    elif args.no_x_comp:
+        print("  远端 x 补偿   关闭（--no-x-comp）")
     print("  link6 抓取点   x=%+7.1f  y=%+7.1f  z=%+7.1f mm" % tuple(tgt))
     print("  预抓取点       x=%+7.1f  y=%+7.1f  z=%+7.1f mm" % tuple(pre))
     far = [b for b in out_of_bounds(tuple(v / 1000.0 for v in tgt))
@@ -1555,20 +1766,28 @@ def main():
     # 半径上限：真抓 620mm、探物料 650mm（2026-11-01 实测：545 正常；
     # 580 z 补发失败差 9mm；634 要求 z+5mm 反而掉 17mm；646/673 卡到超时）。
     # probe 只悬停、不下降不夹，对 z 的要求低得多，所以放宽一档；
-    # 真抓要下降+夹+抬起，600 以上就开始不稳，卡 620。
+    # 半径软上限：来自 config/vision.json（默认 685mm，约全展）。
+    # 这是**经验安全线**，不是机械极限；实际能不能抓取决于当时的腕部姿态。
+    # 2026-11-01 的旧记录：545 正常；580 z 补发失败差 9mm；634 要求 z+5mm
+    # 反而掉 17mm；646/673 卡到超时。2026-11-03 之后用户手推验证 658mm
+    # 的关节姿态可达，所以默认放宽到 685，并用 --allow-far/--max-reach-mm
+    # 允许继续试验。
     radius = float(np.hypot(tgt[0], tgt[1])) / 1000.0
-    r_limit = 0.650
+    r_limit = max(0.0, float(args.max_reach_mm)) / 1000.0
     if radius > r_limit and not args.allow_far:
-        print("  ⛔ 抓取点距底座 %.0f mm，超过可控范围（%dmm），不硬发。"
+        print("  ⛔ 抓取点距底座 %.0f mm，超过软上限 %.0f mm，未发指令。"
               % (radius * 1000, r_limit * 1000))
-        print("     臂在这个位形几乎伸直：z 方向会解出别的肘部构型，")
-        print("     实测 634mm 要它抬 5mm 反而掉 17mm，646/673mm 直接卡超时。")
-        print("     → 把物料往底座方向挪 50~80mm 再点；")
-        print("     → 确实要试就加 --allow-far（很大概率卡住）。")
+        print("     这是经验安全线，不是机械极限；确认该位姿可达后可以：")
+        print("     · 加 --allow-far 强行尝试；")
+        print("     · 或调大 --max-reach-mm（全展约 685mm）。")
+        print("     ⚠ 伸展位形下降/抬升会明显变慢，z 可能抬不动。")
         return 1
     if radius > r_limit:
-        print("  ⚠ --allow-far：抓取点距底座 %.0f mm，已超出可控范围，"
+        print("  ⚠ --allow-far：抓取点距底座 %.0f mm，已超过软上限，"
               "z 很可能抬不起来。" % (radius * 1000))
+    elif radius > 0.650:
+        print("  ⚠ 抓取点距底座 %.0f mm，已接近全展：下降/抬升会明显变慢，"
+              "z 可能抬不动；先用 --probe 或低速确认。" % (radius * 1000))
     elif radius > 0.550:
         print("  ⚠ 抓取点距底座 %.0f mm，偏伸展（舒适区 550 以内）："
               "会慢一些，z 精度也会差几毫米。" % (radius * 1000))
@@ -1596,7 +1815,8 @@ def main():
     print("叠加图已存 %s" % saved)
 
     # 只有"窗口没开起来"时才单独弹一次叠加图兜底（正常情况窗口一直有画面）
-    if not lv.on and not args.no_show:
+    # --from-file / --place-only 时 lv 是 None，不能直接访问 lv.on。
+    if lv is not None and not lv.on and not args.no_show:
         try:
             cv2.namedWindow("vision_pick", cv2.WINDOW_NORMAL)
             h, w = view.shape[:2]
@@ -1662,7 +1882,9 @@ def main():
     print("\n[1/7] 张开夹爪")
     if lv is not None:
         lv.set_status("[1/7] opening grip")
+    _t = time.perf_counter()
     rc, _ = cli_grip("open", 20)
+    record("pick_grip_open", time.perf_counter() - _t)
     if rc != 0:
         print("  ⚠ 张开没确认到位，继续（多数情况下已经张开）")
 
@@ -1670,8 +1892,10 @@ def main():
           % (pre_z - tgt[2]))
     if lv is not None:
         lv.set_status("[2/7] moving to pre-grasp")
+    _t = time.perf_counter()
     rc, act = cli_pose(pre, args.wait, args.tol, not args.no_force, args.allow_far,
                        settle=False)
+    record("move_pre", time.perf_counter() - _t)
     if rc == 3:
         print("\n⛔ 目标超出可达范围，已中止。把物料往底座方向挪 8~10cm 再试。")
         rec["note"] = "目标超出工作区"
@@ -1679,6 +1903,57 @@ def main():
         return 2
     if rc != 0:
         return bail("预抓取移动")
+
+    # ---- 人工测量夹爪偏移：停在预抓取点，输入指尖-物料偏差
+    # x/y 仍按当前偏移+坐标移动，z 停在预抓取高度；不下降、不夹取。
+    if args.measure_offset:
+        if args.dry_run:
+            print("\n[测量] --dry-run：会停在 link6 (%+.1f, %+.1f, %+.1f)，不动作"
+                  % tuple(pre))
+            return 0
+        print("\n[测量] 已停在预抓取点（夹爪张开，不下降、不夹取）")
+        print("  物料基座坐标: (%+.1f, %+.1f) mm" % tuple(P_mm[:2]))
+        print("  当前夹爪偏移: 局部 (%+.1f, %+.1f, %+.1f) mm" % tuple(off_mm))
+        print("  当前 link6 目标: (%+.1f, %+.1f, %+.1f) mm" % tuple(pre))
+        if act is not None:
+            print("  实际 link6:     (%+.1f, %+.1f, %+.1f) mm" % tuple(act))
+        print("\n  请测量：指尖中心相对物料中心的偏差（基座系）")
+        print("        x 向前为正，y 向左为正；指尖在物料前方/左侧时为正")
+        try:
+            s = input("  Δx [mm]（+ = 指尖偏前）> ").strip()
+            dx_meas = float(s) if s else 0.0
+            s = input("  Δy [mm]（+ = 指尖偏左）> ").strip()
+            dy_meas = float(s) if s else 0.0
+        except (EOFError, KeyboardInterrupt):
+            print("\n  已取消。")
+            return 1
+        except ValueError:
+            print("\n  ✗ 不是数值，已取消。")
+            return 2
+
+        new_off, corr = offset_after_measurement(off_mm, R, dx_meas, dy_meas)
+        print("\n  实测偏差: (%+.1f, %+.1f) mm" % (dx_meas, dy_meas))
+        print("  目标修正: (%+.1f, %+.1f) mm（世界系）" % tuple(corr[:2]))
+        print("  旧偏移(局部): (%+.1f, %+.1f, %+.1f) mm" % tuple(off_mm))
+        print("  新偏移(局部): (%+.1f, %+.1f, %+.1f) mm" % tuple(new_off))
+        print("  等价 --dxy: %+.1f %+.1f" % (corr[0], corr[1]))
+        if args.save_offset:
+            try:
+                d = json.load(open(OFFSET_JSON, encoding="utf8"))
+            except Exception:                       # noqa: BLE001
+                d = {}
+            d["offset_mm"] = [round(float(v), 3) for v in new_off]
+            d["n"] = int(d.get("n", 0)) + 1
+            d["updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            d["source"] = ("manual tip-to-object measurement; "
+                           "Delta=(%+.1f,%+.1f) mm" % (dx_meas, dy_meas))
+            os.makedirs(DATA, exist_ok=True)
+            with open(OFFSET_JSON, "w", encoding="utf8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=2)
+            print("  已写入 %s（n=%d）" % (OFFSET_JSON, d["n"]))
+        else:
+            print("  未写文件；确认后加 --save-offset 重跑，或用 --offset 临时覆盖。")
+        return 0
 
     # ---- 悬浮观察：停在物料上方不落爪，方便用眼睛量偏差
     if args.probe:
@@ -1755,17 +2030,26 @@ def main():
             print("     （记录时高度差 %+.1f mm，在容差内）"
                   % (0.0 if zerr is None else zerr))
             print("     换到另一个位置再观察一次，攒 2 点以上后跑：")
-            print("     .venv_astra/bin/python scripts/calib_xy.py --from-probe")
+            print("     python3 scripts/vision/calib_xy.py --from-probe")
         return 0
 
     print("\n[3/7] 下降到抓取点")
     if lv is not None:
         lv.set_status("[3/7] descending")
+    # 伸展位形（半径 ≥560mm）垂直上抬可能无效，那里保持旧策略，
+    # 避免为一次注定失败的补偿白等 10 s。
+    allow_up = float(np.hypot(tgt[0], tgt[1])) < 560.0
+    _t = time.perf_counter()
     if args.no_zfix:
         rc, act = cli_pose(tgt, args.wait, args.tol, not args.no_force, args.allow_far)
     else:
+        # up=True：抓取落点偏低也补。绝对误差是双向的（本机 10~11 mm，
+        # 可能高也可能低）；偏低时不补会让夹爪扎进物料/台面。旧版只在
+        # 投放段补偏低，是因为历史上短距离上抬会卡 90 s —— 那个根因
+        # （逐点下发互相覆盖）已在 2026-11-03 修掉，补偿等待也压到 10 s。
         rc, act = cli_pose_zfix(tgt, args.wait, args.tol, not args.no_force,
-                                args.allow_far)
+                                args.allow_far, up=allow_up)
+    record("descend", time.perf_counter() - _t)
     # 只有"完全没拿到位置"才中止；没进容差但停在可用高度就继续抓
     if act is None:
         return bail("下降")
@@ -1786,7 +2070,9 @@ def main():
     # 原来给 20 秒，于是**每次抓取都白等 20 秒**才返回"未到位"，
     # 而下面紧接着就把 2~22 mm 的误差判成"抓稳"了 —— 说明本来就预期到不了。
     # 空爪到底只需 0.7 秒（舵机 time=1000ms），4 秒足够。
+    _t = time.perf_counter()
     rc, err = cli_grip("close", 4)
+    record("pick_grip_close", time.perf_counter() - _t)
     rec["close_err"] = "" if err is None else "%.2f" % err
     if err is None:
         # 一个数据都没收到，说明命令没送达（DDS 发现失败）或 joint_states 断了。
@@ -1796,16 +2082,33 @@ def main():
         print("\n❌ 夹爪没有响应（命令没送达 / joint_states 断了），停在原地不再抬起。")
         print("   先确认：ros2 topic echo /joint_states --once")
         return 1
-    if err is not None:
-        if rc == 0:
-            print("  ⚠ 夹爪完全闭合（误差 %.1fmm）——大概率抓空了" % err)
-        elif 2.0 <= err <= 22.0:
-            print("  ✅ 夹爪被物体挡住 %.1f mm，疑似抓稳" % err)
-            rec["grasp_ok"] = "1"
-        else:
-            print("  ? 闭合误差 %.1fmm，状态可疑" % err)
-    if rc != 0 and rec["grasp_ok"] == "0":
-        rec["note"] = "夹爪闭合异常"
+    grasped = grasp_closed_ok(rc, err)
+    if not params.GRASP_CHECK:
+        # 2026-11-05 夹爪 3D 打印件损坏，只能空夹：跳过“是否夹到物体”的判据，
+        # 让动作继续抬起/放置；夹爪命令没送达（err=None）上面仍然会中止。
+        print("  ⚠ 夹取判断已关闭（config: grasp.check_grasp=false）：按已夹住继续")
+        grasped = True
+        rec["grasp_ok"] = "skipped"
+        rec["note"] = "夹取判断已跳过（空夹）"
+    elif grasped:
+        print("  ✅ 夹爪被物体挡住 %.1f mm，疑似抓稳" % err)
+        rec["grasp_ok"] = "1"
+    elif rc == 0:
+        print("  ⚠ 夹爪完全闭合（误差 %.1fmm）——大概率抓空了" % err)
+    else:
+        print("  ? 闭合误差 %.1fmm，状态可疑" % err)
+
+    # 空夹不再自动做 x/y 搜索：偏差由人工测量后写成固定补偿，
+    # 避免机器人自己在桌面上试位置（慢，而且可能碰到旁边物体）。
+    if not grasped:
+        rec["note"] = "未夹住"
+        append_log(rec)
+        if args.no_lift:
+            print("\n❌ 未夹住，停在当前点（--no-lift）。")
+            return 1
+        print("\n❌ 未夹住，回 home（不再抬起/投放，避免空跑）。")
+        go_home()
+        return 1
 
     if args.no_lift:
         append_log(rec)
@@ -1831,7 +2134,9 @@ def main():
         print("  伸展位形（半径 %.0fmm）→ 抬起时**斜着往回收**到半径 %.0fmm，"
               "否则抬不动" % (float(np.hypot(pre[0], pre[1])),
                               float(np.hypot(_up[0], _up[1]))))
+    _t = time.perf_counter()
     rc, _ = lift_to(_up, args, tol=max(args.tol, 30.0))
+    record("pick_lift", time.perf_counter() - _t)
     if rc != 0:
         print("  ⚠ 抬起没确认到位，检查是否撞到东西")
 
@@ -1839,11 +2144,13 @@ def main():
     if rec["grasp_ok"] == "1":
         print("\n✅ 抓取完成，夹爪被挡住 %.1f mm，疑似抓稳" % (err or 0))
         print("   想标夹爪偏移：换 3~5 个位置各抓一次，再跑 gripper_offset_calib.py")
+    elif rec["grasp_ok"] == "skipped":
+        print("\n⚠ 夹取判断已关闭：动作走完，按空夹继续（不再回 home）")
     else:
         print("\n⚠ 动作走完了，但夹爪没夹到东西（闭合误差 %.1f mm）"
               % (err if err is not None else -1))
         print("   常见原因：抓取高度(z_g)不对 / 物料比预想的矮 / 臂落了 10~15mm")
-        print("   先看 output/pick_view.png 里夹爪和物料的相对位置")
+        print("   先看 data/vision/preview/pick_view.png 里夹爪和物料的相对位置")
         go_home()
         return 0
 

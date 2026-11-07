@@ -13,10 +13,13 @@ scene 只检查"逻辑上说不说得通"（高度为正、取放点不重合之
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import config
+
 Xyz = Tuple[float, float, float]
 
 #: 夹爪行程（2026-11-03 拆装后手推实测）：grip 0 -> 4 mm，grip 1 -> 65 mm
-GAP_MIN_MM, GAP_MAX_MM = 8.0, 65.0
+#: 真值在 config/robot.json；这里只做派生，避免和 primitives 各写一份。
+GAP_MIN_MM, GAP_MAX_MM = config.GAP_MIN_MM, config.GAP_MAX_MM
 
 
 @dataclass(frozen=True)

@@ -1,28 +1,59 @@
-"""任务层的全部可调参数与口径常量。
+"""任务层的可调参数与口径映射。
 
 设计原则：这里只放"数"和"映射"，不放逻辑。
-改行为请改 primitives.py / sequence.py，改口径请只改本文件。
+改行为请改 primitives.py / sequence.py；改**物理口径**（夹爪端点、零位、home、
+边界）请改仓库根 `config/robot.json`，本文件只保留任务层自己的调参。
 """
 
+import importlib.util
 import os
+import sys
 from pathlib import Path
+
+
+# ---------------------------------------------------------------- 共享参数
+def _repo_root() -> Path:
+    """定位仓库根（含 scripts/roarm_cli.py 的目录）。
+
+    --symlink-install 时 __file__ 指向 src；普通安装指向 install/…/site-packages。
+    两种层级都能通过向上查找命中仓库根。非常规部署用 ROARM_ROOT 覆盖。
+    """
+    env = os.environ.get("ROARM_ROOT")
+    if env:
+        return Path(env).expanduser().resolve()
+    here = Path(__file__).resolve()
+    for base in here.parents:
+        if (base / "scripts" / "roarm_cli.py").is_file():
+            return base
+    raise RuntimeError(
+        "找不到仓库根（scripts/roarm_cli.py）；用 ROARM_ROOT 指定")
+
+
+def _load_params():
+    """加载 scripts/roarm_lib/params.py。
+
+    任务层可能运行在 install/build 拷贝里，不能假设 scripts 在 sys.path 上；
+    按路径显式加载，保证和脚本侧读的是同一份 config/robot.json。
+    """
+    path = _repo_root() / "scripts" / "roarm_lib" / "params.py"
+    spec = importlib.util.spec_from_file_location("_roarm_params", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载 %s" % path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+P = _load_params()
+
 
 # ---------------------------------------------------------------- 底层通道
 def _find_cli() -> Path:
-    """定位 scripts/roarm_cli.py。
-
-    不写死 parents[N]：--symlink-install 下 __file__ 可能指向 src，也可能
-    指向 install，层级数不一样。改为从自身向上逐级找 scripts/roarm_cli.py。
-    """
     env = os.environ.get("ROARM_CLI")
     if env:
         return Path(env).expanduser()
-    here = Path(__file__).resolve()
-    for base in here.parents:
-        cand = base / "scripts" / "roarm_cli.py"
-        if cand.is_file():
-            return cand
-    return here.parent / "scripts" / "roarm_cli.py"  # 兜底，调用时会报缺文件
+    return _repo_root() / "scripts" / "roarm_cli.py"
 
 
 #: 终端控臂脚本，任务层通过子进程调用它。
@@ -36,10 +67,10 @@ CALL_TIMEOUT = 60.0
 # ---------------------------------------------------------------- 位姿约定
 #: 末端固定姿态（零位实测 world->link6，RPY = -90/0/-90）。
 #: 保持它就可以"只改位置不改朝向"，夹爪始终朝下。
-DEFAULT_QUAT = (0.5, -0.5, 0.5, -0.5)
+DEFAULT_QUAT = P.DEFAULT_QUAT
 
 #: 笛卡尔回位点（注意：不是关节零位，IK 会解出 j4≈5.9 / j6≈-5.9）
-HOME_XYZ = (0.479, 0.0, 0.369)
+HOME_XYZ = P.HOME_XYZ
 
 #: 到位容差（毫米）。
 #: ⚠ 必须按**实测精度**定，不能按期望。2026-10-18 实测：
@@ -62,14 +93,10 @@ STANDOFF_M = 0.08
 LIFT_M = 0.10
 
 # ---------------------------------------------------------------- 夹爪口径
-#: ⚠ 2026-10-18 **实物实测**，推翻了 10-17 从仿真推出来的结论：
-#:
-#:   舵机 100° -> joint7_left  0.000 -> 两指**张开**（约 50 mm）   ← CLI "open"
-#:   舵机 50°  -> joint7_left -0.016 -> 两指半开（约 32 mm）       ← driver 启动位
-#:   舵机 86.7°-> joint7_left -0.025 -> 两指**合拢**（4 mm）       ← CLI "close"
-#:
-#: 所以 CLI 的 open/close 现在**是自然语义**（open=张开、close=合拢），
-#: 不再是 10-17 记录的"名字相反"。下面这张表因此变成恒等映射。
+#: 端点/开度全部来自 config/robot.json（2026-11-03 拆装后卸力手推实测）：
+#:   舵机  86.7° -> joint7_left -0.025 m -> 两指合拢 4 mm   ← CLI "close"
+#:   舵机 174.8° -> joint7_left  0.000 m -> 两指张开 65 mm  ← CLI "open"
+#: 旧值 21.9°~100°、8~57 mm 已作废。
 #:
 #: 任务层仍然不写 open/close 字面量，只用物理语义：
 #:   close_fingers = 两指合拢 = 夹住
@@ -79,13 +106,12 @@ GRIP_CMD = {
     "open_fingers": "open",
 }
 
-#: 夹爪到位判据：joint7_left 的期望值（米）。
-#: joint 坐标始终是标准的 [-0.025, 0]（0=张开 65 mm，-0.025=闭合 4 mm），
-#: 2026-11-03 拆装只改了**舵机角度**的对应关系，见 robo_driver.GRIP_DEG_*。
-GRIP_EXPECT = {
-    "close_fingers": -0.025,
-    "open_fingers": 0.0,
-}
+GRIP_DEG_MIN, GRIP_DEG_MAX = P.CLOSE, P.OPEN
+GAP_MIN_MM, GAP_MAX_MM = P.GMIN, P.GMAX
+GAP_ZERO_POS = P.JMIN
+
+#: 夹爪到位判据：joint7_left 的期望值（米），由端点派生。
+GRIP_EXPECT = dict(P.GRIP_EXPECT)
 
 # ---------------------------------------------------------------- 序列行为
 #: 单个原语失败后是否重试一次。抓取类动作重试有风险（可能已撞到东西），

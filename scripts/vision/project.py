@@ -99,11 +99,14 @@ def _selftest():
     here = os.path.dirname(os.path.abspath(__file__))
     cand = [
         os.path.join(here, "..", "..", "data", "handeye_result.npz"),
-        "/home/ljl/桌面/brain_extract/brain/vision/data/handeye_result.npz",
+        os.path.join(here, "..", "..", "data", "vision", "handeye_result.npz"),
     ]
+    base = os.environ.get("TEAMMATE_VISION_DIR")
+    if base:
+        cand.insert(0, os.path.join(base, "data", "handeye_result.npz"))
     npz = next((p for p in cand if os.path.isfile(p)), None)
     if npz is None:
-        print("跳过：找不到 handeye_result.npz")
+        print("跳过：找不到 handeye_result.npz（可用 TEAMMATE_VISION_DIR 指定队友目录）")
         return 0
 
     T = np.load(npz)["T_base_cam"]

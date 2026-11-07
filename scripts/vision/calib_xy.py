@@ -13,7 +13,7 @@
     3. 按提示输入 → 脚本自动拍照、检测、记录；
     4. 重复 4 次，尽量覆盖 近/远 × 左/右 四角。
 
-结果写 data/xy_correction.json，vision_pick.py 自动读取并应用：
+结果写 data/vision/xy_correction.json，scripts/vision/pick.py 自动读取并应用：
 
     p_corr = p + (A p + b - p) - (A p0 + b - p0)
 
@@ -21,9 +21,9 @@
 不用重调（它是在 p0 附近调出来的），远端的斜率误差才被改掉。
 
 用法:
-    .venv_astra/bin/python scripts/calib_xy.py           # 交互录入
-    .venv_astra/bin/python scripts/calib_xy.py --show    # 看当前修正
-    .venv_astra/bin/python scripts/calib_xy.py --clear   # 删除修正
+    python3 scripts/vision/calib_xy.py           # 交互录入
+    python3 scripts/vision/calib_xy.py --show    # 看当前修正
+    python3 scripts/vision/calib_xy.py --clear   # 删除修正
 """
 import argparse
 import csv
@@ -150,7 +150,7 @@ def fit_yline(pts):
 def load_probe_points(path):
     """读 vision_pick --probe --record 攒的点：真值 = 视觉 + 当时用的 dxy。"""
     if not os.path.isfile(path):
-        sys.exit("找不到 %s —— 先跑 vision_pick.py --probe --record 记几个点" % path)
+        sys.exit("找不到 %s —— 先跑 scripts/vision/pick.py --probe --record 记几个点" % path)
     pts = []
     with open(path, newline="", encoding="utf8") as f:
         for r in csv.DictReader(f):
@@ -196,7 +196,7 @@ def save_correction(A, b, p0, rms, pts, source, keep_right_dy=True):
     with open(JSON_PATH, "w", encoding="utf8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
     print("\n已写入 %s" % JSON_PATH)
-    print("vision_pick.py 下次运行会自动应用（会打印「已应用 XY 线性修正」）。")
+    print("scripts/vision/pick.py 下次运行会自动应用（会打印「已应用 XY 线性修正」）。")
     return 0
 
 

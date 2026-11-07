@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "scene": {
+    "z_default_m": 0.0926,
+    "object_height_default_m": 0.07
+  },
+  "grasp": {
+    "offset_default_mm": [32.1, 23.6, 79.2],
+    "z_cmd_offset_m": -0.001,
+    "x_bias_mm": -2.0,
+    "y_bias_mm": -1.0,
+    "check_grasp": false
+  },
+  "reach": {
+    "x": [0.278, 0.67],
+    "y": [-0.4, 0.35],
+    "z": [0.074, 0.438],
+    "max_pick_radius_mm": 685.0
+  },
+  "colors": {
+    "red": {
+      "material": [
+        [[0, 129, 171], [8, 255, 255]],
+        [[130, 90, 60], [164, 255, 255]]
+      ],
+      "tray": [
+        [[166, 97, 215], [179, 177, 255]]
+      ]
+    },
+    "blue": {
+      "material": [
+        [[100, 140, 60], [135, 255, 255]]
+      ],
+      "tray": [
+        [[99, 77, 210], [119, 157, 255]]
+      ]
+    },
+    "green": {
+      "material": [
+        [[60, 90, 90], [95, 255, 255]]
+      ],
+      "tray": [
+        [[59, 50, 156], [79, 130, 236]]
+      ],
+      "mask_tray": false
+    },
+    "yellow": {
+      "material": [
+        [[20, 120, 60], [35, 255, 255]]
+      ]
+    }
+  },
+  "detect": {
+    "tall_aspect_max": 1.25,
+    "tall_solidity_min": 0.78,
+    "reach_mm": [250.0, 670.0, -430.0, 380.0],
+    "max_area_px": 16000,
+    "min_area_px": 400,
+    "aspect_range": [0.30, 2.60],
+    "min_shape": 1.05,
+    "big_area_px": 1000,
+    "v_mean_min": {
+      "red": 130,
+      "green": 130,
+      "blue": 130,
+      "yellow": 130
+    }
+  }
+}

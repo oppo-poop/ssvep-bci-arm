@@ -29,3 +29,17 @@ data/runs/*.log
 
 # 抓取日志：运行时逐条追加，进仓库只会不断冲突
 data/vision/pick_log.csv
+
+# 阶段 0 计时日志（pick.py / arm_service.py 追加）
+data/vision/timing.jsonl
+
+# 视觉运行产物（诊断图/采集图/中间样本）
+data/vision/preview/
+data/vision/calib_images/
+data/vision/calib_intrinsics_raw.npz
+data/vision/handeye_samples.npz
+data/vision/probe_points.csv
+scripts/output/
+
+# 8 指令服务的 Unix socket
+data/*.sock

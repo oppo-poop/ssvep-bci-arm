@@ -5,13 +5,16 @@
 #   VELOCITY=0.15 ACCELERATION=0.30 bash scripts/robot_up.sh   # 约 1.5 倍速（默认 0.10）
 #   RVIZ=true bash scripts/robot_up.sh  # 带 RViz（需要可用的 X/GLX）
 #   bash scripts/robot_up.sh --status   # 看各节点状态
-#   bash scripts/robot_up.sh --stop     # 全部停掉
+#   bash scripts/robot_up.sh --stop     # 停止；随后回 park 位并解锁力矩
+#   bash scripts/robot_up.sh --stop --no-park   # 只停节点，不动臂
+#   bash scripts/robot_up.sh --stop --yes       # 非交互（脚本里用）
 #
 # 与 sim_up.sh 的区别：
 #   · 真机不用 sim_gripper_bridge —— robo_driver 直接订阅 set_angle_topic
 #   · 不摘 DISPLAY（rviz 要用）
-#   · 启动 driver **不会**让臂动（zero_on_start=false），只上力矩
-#   · 回零由本脚本最后一步做：MoveIt 规划 + 慢速，不是驱动那种 1.5 s 甩臂
+#   · 启动 driver 默认用 3 s 驱到零位；ZERO_ON_START=false 则只上力矩
+#   · zero_on_start=false 时，回零由本脚本最后一步做：MoveIt 规划 + 慢速
+#   · 停止时默认先把节点收掉，再用一条 3 s 命令回收纳位并解锁力矩
 #
 # 日志：$WS/.robot_*.log
 
@@ -89,8 +92,11 @@ wait_for_log() {
   return 1
 }
 
-stop_all() {
-  [ -f "$PIDFILE" ] || { msg "没有记录在跑的进程"; return 0; }
+stop_nodes() {
+  if [ ! -f "$PIDFILE" ]; then
+    msg "没有记录在跑的进程"
+    return 0
+  fi
   local pgid
   while read -r pgid; do
     [ -n "$pgid" ] || continue
@@ -102,7 +108,57 @@ stop_all() {
     alive "$pgid" && kill -KILL -"$pgid" 2>/dev/null
   done < "$PIDFILE"
   rm -f "$PIDFILE"
-  ok "已停止"
+  ok "节点已停止"
+}
+
+park_and_unlock() {
+  local gz="$SCRIPT_DIR/calib/go_zero.py"
+  local park_ms="${PARK_MS:-3000}"
+  if [ ! -f "$gz" ]; then
+    warn "找不到 $gz，跳过收纳/解锁"
+    return 1
+  fi
+  msg "收纳：一条 ${park_ms} ms 命令驱到 park 位并解除力矩…"
+  msg "⚠ 解除力矩后机械臂将失去支撑，请先托住。"
+  if $PY "$gz" --preset park --direct --step-ms "$park_ms" --go --unlock --yes; then
+    ok "已到收纳位并解除力矩"
+    return 0
+  fi
+  warn "收纳/解锁未完成：机械臂可能仍在力矩保持（看上面的输出）"
+  return 1
+}
+
+#: --stop 的完整流程：先停节点释放串口，再回 park 并解锁。
+#: start_all 的失败路径只调用 stop_nodes，不会额外驱动机械臂。
+stop_all() {
+  local rc=0
+  stop_nodes
+  sleep 1                       # 等已退出的 driver 释放串口
+
+  case "${PARK_ON_STOP:-true}" in
+    false|0|no)
+      msg "PARK_ON_STOP=false：跳过收纳/解锁"
+      return 0
+      ;;
+  esac
+
+  if [ "${STOP_YES:-false}" = "true" ]; then
+    park_and_unlock || rc=1
+    return $rc
+  fi
+
+  if [ -t 0 ]; then
+    printf '停止后将把机械臂驱到 park 位并解除力矩。继续？[y/N] '
+    read -r ans
+    case "$ans" in
+      [yY]|[yY][eE][sS]) park_and_unlock || rc=1 ;;
+      *) msg "跳过收纳/解锁（舵机仍保持力矩）" ;;
+    esac
+  else
+    warn "非交互模式：跳过收纳/解锁。需要时加 --yes，或手动执行："
+    msg "  $PY $SCRIPT_DIR/calib/go_zero.py --preset park --direct --step-ms ${PARK_MS:-3000} --go --unlock --yes"
+  fi
+  return $rc
 }
 
 status() {
@@ -164,7 +220,7 @@ start_all() {
     zero_on_start:="$zero_start" > "$DRVLOG" 2>&1 &
   local drv_pid=$!
   echo "$drv_pid" >> "$PIDFILE"
-  wait_for_log "$DRVLOG" "初始化完成\|Initialization complete" 20 "cello_driver" || { stop_all; exit 1; }
+  wait_for_log "$DRVLOG" "初始化完成\|Initialization complete" 20 "cello_driver" || { stop_nodes; exit 1; }
 
   # ---- 2) 等 joint_states 真的有发布者（TF 的前提）
   local i n
@@ -178,7 +234,7 @@ start_all() {
   else
     err "joint_states 没有发布者，driver 可能没打开串口"
     msg "  看 $DRVLOG"
-    stop_all; exit 1
+    stop_nodes; exit 1
   fi
 
   # 光有 publisher 还不够：driver 可能刚初始化完就因为串口异常退出。
@@ -189,7 +245,7 @@ start_all() {
   else
     err "joint_states 没有实际数据，driver 可能已因串口异常退出"
     msg "  看 $DRVLOG"
-    stop_all; exit 1
+    stop_nodes; exit 1
   fi
 
   # ---- 3) move_group + rsp（RViz 默认关闭：本机 GLX 不可用时 rviz2 会崩）
@@ -199,7 +255,7 @@ start_all() {
     use_rviz:="$rviz" > "$DEMOLOG" 2>&1 &
   local demo_pid=$!
   echo "$demo_pid" >> "$PIDFILE"
-  wait_for_log "$DEMOLOG" "You can start planning" 45 "move_group" || { stop_all; exit 1; }
+  wait_for_log "$DEMOLOG" "You can start planning" 45 "move_group" || { stop_nodes; exit 1; }
 
   # ---- 4) 执行节点。默认 VELOCITY=0.10（约 6 mm/s，是旧值 0.05 的 2 倍），
   #         与 joint_limits.yaml 的 default_velocity_scaling_factor 一致。
@@ -214,7 +270,7 @@ start_all() {
     velocity_scaling:="$vel" acceleration_scaling:="$acc" > "$NODELOG" 2>&1 &
   local node_pid=$!
   echo "$node_pid" >> "$PIDFILE"
-  wait_for_log "$NODELOG" "ArmMoveitControl ready" 20 "arm_moveit_write" || { stop_all; exit 1; }
+  wait_for_log "$NODELOG" "ArmMoveitControl ready" 20 "arm_moveit_write" || { stop_nodes; exit 1; }
 
   # ---- 5) 自动回零（一条命令就到位，不用再手敲第二条）
   # 走 MoveIt 规划，速度受上面的 velocity_scaling 控制；
@@ -236,7 +292,7 @@ start_all() {
       msg "  ${DIM}$PY $SCRIPT_DIR/roarm_cli.py where${RST}"
       msg "  ${DIM}$PY $SCRIPT_DIR/roarm_cli.py home --wait 180 --tol 25${RST}"
       msg "  若反复失败（规划不出来），看 ${NODELOG}，或先无力矩逼近："
-      msg "  ${DIM}$PY $SCRIPT_DIR/go_zero.py --preset park${RST}"
+      msg "  ${DIM}$PY $SCRIPT_DIR/calib/go_zero.py --preset park${RST}"
     fi
   else
     msg "AUTO_HOME=false：跳过回零，臂停在当前姿态（已上力矩）"
@@ -255,7 +311,17 @@ start_all() {
 
 case "${1:-}" in
   --status) source_ros >/dev/null 2>&1 || true; status ;;
-  --stop)   source_ros >/dev/null 2>&1 || true; stop_all ;;
+  --stop)
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --yes|-y)  STOP_YES=true; shift ;;
+        --no-park) PARK_ON_STOP=false; shift ;;
+        *)         msg "用法：$0 --stop [--yes] [--no-park]"; exit 2 ;;
+      esac
+    done
+    stop_all
+    ;;
   "")       start_all ;;
-  *)        msg "用法：$0 [--status|--stop]"; exit 2 ;;
+  *)        msg "用法：$0 [--status|--stop [--yes] [--no-park]]"; exit 2 ;;
 esac

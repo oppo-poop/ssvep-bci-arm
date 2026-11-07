@@ -52,17 +52,17 @@ class TestGripperSemantics(unittest.TestCase):
             m.assert_called_once_with("open_fingers", action="release")
 
     def test_measured_mapping(self):
-        # 2026-10-18 实物实测：CLI "open" -> 舵机 100° -> 两指张开
-        #                     CLI "close"-> 舵机 21.9° -> 两指合拢
+        # 2026-11-03 卸力手推实测：CLI "open" -> 舵机 174.8° -> 两指张开
+        #                       CLI "close"-> 舵机 86.7° -> 两指合拢（4 mm）
         # （10-17 从仿真推出来的"名字相反"是错的，仿真的夹爪桥做过 clamp，方向没验过）
         self.assertEqual(config.GRIP_CMD["close_fingers"], "close")
         self.assertEqual(config.GRIP_CMD["open_fingers"], "open")
 
     def test_gap_conversion(self):
-        # 2026-10-18 卡尺实测：0.000 -> 65 mm，-0.025 -> 8 mm（合到底仍有 8 mm 间隙）
+        # 2026-11-03 卸力手推实测：0.000 -> 65 mm，-0.025 -> 4 mm（合到底仍有 4 mm 间隙）
         self.assertAlmostEqual(primitives.gripper_gap_mm(0.0), 65.0)
-        self.assertAlmostEqual(primitives.gripper_gap_mm(-0.025), 8.0)
-        self.assertAlmostEqual(primitives.gripper_gap_mm(-0.015), 30.8, places=1)
+        self.assertAlmostEqual(primitives.gripper_gap_mm(-0.025), 4.0)
+        self.assertAlmostEqual(primitives.gripper_gap_mm(-0.015), 28.4, places=1)
         self.assertIsNone(primitives.gripper_gap_mm(None))
 
 

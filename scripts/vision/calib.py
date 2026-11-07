@@ -134,9 +134,17 @@ def _selftest():
     import tempfile
 
     print("  1) 用队友的真实外参验证")
-    src = "/home/ljl/桌面/brain_extract/brain/vision/data/handeye_result.npz"
-    if not os.path.isfile(src):
-        print("     跳过：找不到 %s" % src)
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = [
+        os.path.join(here, "..", "..", "data", "handeye_result.npz"),
+        os.path.join(here, "..", "..", "data", "vision", "handeye_result.npz"),
+    ]
+    base = os.environ.get("TEAMMATE_VISION_DIR")
+    if base:
+        cand.insert(0, os.path.join(base, "data", "handeye_result.npz"))
+    src = next((p for p in cand if os.path.isfile(p)), None)
+    if src is None:
+        print("     跳过：找不到 handeye_result.npz（可用 TEAMMATE_VISION_DIR 指定队友目录）")
     else:
         _, T = import_teammate_npz(src)
         print("     T 平移(mm) = %s" % np.round(T[:3, 3] * 1000, 1))

@@ -9,13 +9,12 @@
     这个节点只跑在仿真里，把 set_angle_topic（舵机角度，度）翻译成
     hand_controller 的 GripperCommand 动作（关节位置，米），让仿真的夹爪真的动。
 
-单位换算（与 cello_controller.py 的 meters_to_degrees 互逆）：
-    meters_to_degrees(m) = (m / 0.032) * 100 + 100
-    ⇒ m = (deg - 100) * 0.032 / 100
+单位换算（与 robo_driver / cello_controller 的新端点一致）：
+    舵机 86.7° → joint7_left -0.025 m → 两指闭合 4 mm
+    舵机 174.8° → joint7_left  0.000 m → 两指张开 65 mm
+    换算集中在 roarm_lib.params，本文件不再保存第二份公式。
 
-    注意：arm_moveit_write 的 "close" 是 0.0° → m = −0.032，超出 URDF 限位 [−0.025, 0]。
-    本节点会把超限值**夹紧到 −0.025 并打日志**，不静默吞掉——这条正是核查报告 §六·F
-    记录的「三套角度口径」在实际运行中的表现。
+    注意：超限值会被夹紧到 URDF 限位并打日志，不静默吞掉。
 
 用法（通常由 sim_up.sh 自动启动）：
     python3 scripts/sim_gripper_bridge.py
@@ -30,14 +29,15 @@ from rclpy.node import Node
 from control_msgs.action import GripperCommand
 from robo_interfaces.msg import SetAngle
 
+from roarm_lib import params
+
 GRIPPER_SERVO_ID = 6
-ARM_LENGTH_M = 0.032
-LIMIT_LOW, LIMIT_HIGH = -0.025, 0.0
+LIMIT_LOW, LIMIT_HIGH = params.JMIN, params.JMAX
 CLAMP_WARN_M = 2e-4
 
 
 def deg_to_meters(deg):
-    return (deg - 100.0) * ARM_LENGTH_M / 100.0
+    return params.servo_to_joint(deg)
 
 
 class SimGripperBridge(Node):

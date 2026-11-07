@@ -3,7 +3,7 @@
 """Astra Pro 彩色相机内参标定（4 码 ArUco 板）
 
 用法:
-    .venv_astra/bin/python calib_intrinsic.py --a 30 --dx 200 --dy 150
+    python3 scripts/vision/calib_intrinsic.py --a 30 --dx 200 --dy 150
 
 参数:
     --a   单个 ArUco 码的黑色方块边长 (mm)

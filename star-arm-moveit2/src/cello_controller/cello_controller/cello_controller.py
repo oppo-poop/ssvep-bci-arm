@@ -36,16 +36,30 @@ def radians_to_degrees(radians):
     """弧度转角度 / convert radians to degrees"""
     return radians * (180 / math.pi)
 
-def meters_to_degrees(meters):
-    """长度(米)转角度（基于臂长0.032m）/ convert meters to degrees"""
-    return (meters / 0.032) * 100
+
+# 夹爪端点：与 config/robot.json 一致，由 scripts/checks/grip_check.py 强制检查。
+# 2026-11-03 拆装后卸力手推实测：86.7°=闭合 4 mm（joint -0.025），
+# 174.8°=张开 65 mm（joint 0.000）。旧的 32 mm 行程公式已作废。
+GRIP_DEG_CLOSE = 86.7
+GRIP_DEG_OPEN = 174.8
+GRIP_JOINT_MIN = -0.025
+GRIP_JOINT_MAX = 0.0
+GRIP_SERVO_SPAN = GRIP_DEG_OPEN - GRIP_DEG_CLOSE
+GRIP_JOINT_SPAN = GRIP_JOINT_MAX - GRIP_JOINT_MIN
+
 
 def jointstate2servoangle(servo_id, joint_state):
-    """关节状态转舵机命令角度 / joint state to servo angle"""
+    """关节状态转舵机命令角度 / joint state to servo angle
+
+    臂关节只做弧度→度；零位偏移由 robo_driver 在写方向补回，往返抵消。
+    joint7 必须用实测端点反算，否则取消时的"保持当前角度"会把夹爪打错位置。
+    """
     if servo_id < 6:
         return radians_to_degrees(joint_state)
     elif servo_id == 6:
-        return meters_to_degrees(joint_state) + 100
+        return GRIP_DEG_CLOSE + (joint_state - GRIP_JOINT_MIN) \
+            * GRIP_SERVO_SPAN / GRIP_JOINT_SPAN
+    return 0.0
 
 
 class RoboActionClient(Node):
@@ -86,6 +100,7 @@ class RoboActionClient(Node):
         )
         self.get_logger().info(f"{ROBO_ACTION_NODE} is ready.")  # 节点就绪日志 / ready log
         self.current_angle = [0.0] * 7  # 当前舵机角度缓存 / current servo angles
+        self._known = [False] * 7
         self.last_time = 0  # 上一次时间戳 / last trajectory time index
         # 是否收到过 joint_states。下发"保持当前角度"前必须确认：
         # current_angle 的初值全是 0.0，未收到状态时发出去等于命令所有关节转到 0°。
@@ -109,11 +124,16 @@ class RoboActionClient(Node):
             self.get_logger().warn(
                 f'arm {why}: 尚未收到 joint_states，跳过保持（避免把 0° 当成目标）')
             return
+        ids = [i for i in range(7) if self._known[i]]
+        if not ids:
+            self.get_logger().warn(
+                f'arm {why}: 没有任何已知关节角，跳过保持（避免把 0° 当成目标）')
+            return
         try:
             hold = SetAngle(
-                servo_id=list(range(7)),
-                target_angle=[float(a) for a in self.current_angle],
-                time=[100] * 7,
+                servo_id=ids,
+                target_angle=[float(self.current_angle[i]) for i in ids],
+                time=[100] * len(ids),
             )
             self.set_angle_publisher.publish(hold)
             self.get_logger().warn(f'arm {why}: 已下发保持当前角度')
@@ -125,6 +145,7 @@ class RoboActionClient(Node):
         for name, pos in zip(msg.name, msg.position):
             idx = ROBO_TYPE_1_INDEX_JOINT_[name]
             self.current_angle[idx] = jointstate2servoangle(idx, pos)
+            self._known[idx] = True
         self._have_state = True
 
     # ---- 轨迹下发模型（2026-11-03）----
@@ -152,7 +173,7 @@ class RoboActionClient(Node):
 
     # robo_driver.set_angle_callback 里 interval = msg.time + 400 ms。
     # 控制器必须等满这个时长才 succeed，否则舵机没走完就被下一条命令打断。
-    # **这个值必须和驱动层一致** —— scripts/traj_check.py 会从两处源码
+    # **这个值必须和驱动层一致** —— scripts/checks/traj_check.py 会从两处源码
     # 分别抓来比对，改了驱动层却忘了这里，自检会报出来。
     INTERVAL_PAD_MS = 400
 

@@ -14,12 +14,15 @@
 | `project.py` | 像素 → 基座坐标（桌面平面反投影） | **20 行核心**，`pixel_to_base(u, v, K, dist, T, z)` |
 | `aruco.py` | ArUco 检测 + PnP | **兼容新旧 OpenCV API**（本机 4.5.4 没有 `ArucoDetector`） |
 | `calib.py` | 标定文件读写与校验 | 单位体检（平移 >100 判为毫米误用）、分辨率一致性 |
-| `pick.py` | 抓取主流程（1872 行） | 一条龙 / 两段式都可；详见下面 |
+| `pick.py` | 抓取主流程（约 1980 行） | 一条龙 / 两段式都可；参数从 `config/vision.json` 取默认值 |
+| `color_detect.py` | **物料 + 投放色纸检测**（移植自队友 `cap/color_detect.py`） | 物料用 V均值/面积/宽高比/可达范围；色纸用 `find_pads`（mm²/填充率/多档 S,V）；`pick.py --auto` 调用物料部分 |
+| `detect_color.py` | 实时/单张颜色检测诊断 | 与 `pick.py --auto` 同一套判据；`--pads` 同时显示三张投放色纸 |
+| `tune_colors.py` | 实时拖滑块调 HSV 阈值（移植自队友） | 按 `s` 打印可粘进 `config/vision.json` 的片段 |
 | `calib_intrinsic.py` | 内参标定（4 码大板，空格采集） | 输出 `calib_intrinsics_raw.npz`，剔坏图后才是 clean 版 |
 | `calib_xy.py` | XY 线性修正标定（探针法） | 生成 `xy_correction.json` |
 | `handeye.py` | 手眼标定（码在夹爪，多姿态） | 相机被动过时用它重标 |
 | `fix_extrinsics.py` | 外参平移**应急**修正 | 只修平移不修旋转，最终还是要 `handeye.py` |
-| `depth_probe.py` | 读一帧深度图 | 需要 ROS 话题；当前相机没深度，暂未接 |
+| `depth_probe.py` | 读一帧 ROS 深度话题 | 本机是 Astra Pro RGB-D；当前 pick 只用彩色流 + 固定 `z_g`，OpenNI2 深度流尚未接入 |
 | `live_view.py` | 实时画面窗口 | 调试用，按 `s` 存图 |
 | `snap_color.py` | 拍一张存盘 | 最小依赖，不碰深度 |
 
@@ -29,7 +32,7 @@
 |---|---|---|
 | `cam_intrinsics.npz` | 内参 K/dist + 分辨率 | ✅ **能用**（内参只跟镜头有关，与安装无关） |
 | `T_base_cam.npz` | 相机在基座系的位姿（米） | ⚠️ **只在标定那一刻的安装下有效**；换支架/搬动就要重标 |
-| `grasp_offset.json` | 夹爪 TCP 相对 link6 的偏移 | ⚠️ **换夹爪就要重解**（2026-11-01 换过爪，x 从 28.6 → 50.6） |
+| `grasp_offset.json` | 夹爪 TCP 相对 link6 的偏移 | ⚠️ **换夹爪/重标就要重解**（当前 2026-11-04 队友重标：`[32.1, 23.6, 79.2]`） |
 | `xy_correction.json` | 视觉 XY 的系统性偏差（线性） | ⚠️ 是**经验补偿**，掩盖了标定问题；标定准了就不需要 |
 | `handeye_poses.txt` | 手眼标定的 26 个位姿 | ✅ 已用 MoveIt IK 验证可达，`handeye.py` 直接用 |
 | `pick_log.csv` | 抓取记录（自动追加） | — |
@@ -50,7 +53,20 @@ python3 scripts/vision/pick.py
 
 # 不连相机，用已有图片跑（离线调检测逻辑）
 python3 scripts/vision/pick.py --dry-run --from-file some.png
+
+# 自动按颜色识别（不弹窗点选）：red / green / blue / yellow
+python3 scripts/vision/pick.py --auto --color red
+
+# 点选 + 颜色质心：手只负责指到哪个物体，坐标取同色块质心
+# 适合同色物体多、或手点总落在顶面/边缘的情况
+python3 scripts/vision/pick.py --color green --snap-color
 ```
+
+> `--auto` 走移植后的 `color_detect`：按整块 V 均值排暗背景、按面积排托盘、
+> 按宽高比/“立着”排扁平块，多候选取离底座最近的；找不到时再放宽面积/
+> 饱和度补一次。`--no-tall` 可关闭形态判据。`--snap-color` 仍用点击点附近
+> 的颜色块质心，作为多同色物体时的兜底。
+> 点选模式直接用点击像素；点在物体顶面/边缘会让 x/y 沿相机视线偏移。
 
 **两段式**（BCI 用，先取再放）：
 
@@ -81,6 +97,12 @@ python3 scripts/vision/handeye.py --solve --write
 # ③ 夹爪偏移（换夹爪后）
 #    队友的 gripper_offset_calib.py 注释写着"不要再用"（它算的是历次偏移平均），
 #    当前值是手调 + 探针复测出来的：grasp_offset.json 的 source 字段有记录
+#
+#    人工测量 x/y：停在预抓取点（x/y 按当前偏移，z 在物料上方），不下降
+python3 scripts/vision/pick.py --measure-offset
+#    按提示输入「指尖中心 - 物料中心」的基座系偏差（x 前 / y 左为正）；
+#    工具会把目标反向修正并换算回局部偏移。确认后写回：
+python3 scripts/vision/pick.py --measure-offset --save-offset
 
 # ④ XY 修正（视觉算出的点系统性偏，且偏差随位置线性变化时）
 python3 scripts/vision/calib_xy.py
@@ -89,6 +111,10 @@ python3 scripts/vision/calib_xy.py
 ### 调试
 
 ```bash
+# 颜色检测诊断：物料 + 投放色纸，不动机械臂
+python3 scripts/vision/detect_color.py --image data/vision/preview/green.png --color green --pads
+python3 scripts/vision/detect_color.py --color green --pads     # 用相机实时
+
 # 实时画面（按 s 存图）
 python3 scripts/vision/live_view.py
 
@@ -130,20 +156,26 @@ print('相机位置(mm):', np.round(T[:3,3]*1000, 1))
 
 | 限制 | 影响 |
 |---|---|
-| **相机没有深度**（`realsense2_camera` 找不到设备，实际是 Astra Pro） | `z_g` 只能手填；`depth_probe.py` 接不上 |
+| **深度流未接入 pick** | 相机是 Astra Pro RGB-D，但队友的 `vision_pick.py` 和当前 `pick.py` 都只用彩色流 + 固定 `z_g` 做射线-平面求交；要真正测距需移植 `astra_depth.py`/`snap.py` 并做深度-彩色对齐 |
 | **`T_base_cam` 是合作方标的** | 相机被动过就要重标，见 `handeye.py` |
-| **`xy_correction` 是线性经验补偿** | rms 0.78 mm，但换安装位置后不成立 |
-| **检测是 HSV 颜色阈值** | 换物料/换光照要重调阈值，`pick.py` 的 `blue_candidates` |
+| **`xy_correction` 是线性经验补偿** | 当前队友 2026-11-04 版 `A[1][1]=1.24432`；换安装位置后不成立 |
+| **抓取半径软上限 685 mm** | 经验安全线，不是机械极限；确认位姿可达后用 `--allow-far` 或 `--max-reach-mm` |
+| **远端 x 的 +20/-8 mm 补偿** | 2026-11-01 旧经验值；换爪后建议用 `--no-x-comp` 复核 |
+| **检测是 HSV 颜色阈值** | 2026-11-04 起物料 HSV/面积/亮度判据全部同步队友 `cap/color_detect.py`；换光照再改 `config/vision.json` |
 | **`--place-only` 需要像素** | BCI 侧还没有"选像素"的能力（检测框即刺激未实现） |
 
-## 六、外部依赖
+## 六、外部依赖与环境基线
 
 | 依赖 | 版本 | 说明 |
 |---|---|---|
-| `opencv-python` | 本机 4.5.4 | `aruco.py` 已兼容新旧 API |
+| `opencv-python` | 本机 4.5.4 | `aruco.py` 已兼容新旧 API；`calib_intrinsic.py` 仍用旧 API，换 4.10 前先验证 |
 | `numpy` | 1.26.4 | |
 | `scipy` | 有 | 仅 `handeye.py` 用（`Rotation`） |
 | `rclpy` | Humble | 仅 `depth_probe.py` 用；其他都不依赖 ROS |
 
 **除 `depth_probe.py` 外，所有脚本都不需要 source ROS**，也不需要机械臂在线
 （`--dry-run` / `--from-file`）。
+
+`pick.py` 会在子进程里用 `/usr/bin/python3` + source ROS 调 `roarm_cli.py`；
+主进程只要求 numpy/cv2，不强绑 venv。队友自测数据不在仓库时，设置
+`TEAMMATE_VISION_DIR=/path/to/teammate/vision` 即可，不再硬编码个人目录。

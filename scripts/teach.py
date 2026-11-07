@@ -34,6 +34,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from roarm_lib import params
+
 SCRIPTS = Path(__file__).resolve().parent
 ROOT = SCRIPTS.parent
 CLI = SCRIPTS / "roarm_cli.py"
@@ -42,15 +44,11 @@ SCENE_OUT = ROOT / "data" / "scene_real.yaml"
 
 #: 实测移动速度（velocity_scaling=0.05）：30 mm 用 9.9 s ≈ 3 mm/s
 SPEED_MM_S = 3.0
-#: 夹爪舵机角与物理开合的关系。**2026-10-18 实物实测，与之前仿真的推算相反**：
-#:   舵机 100° → joint7_left =  0.000 → 两指**张开**（约 50 mm）
-#:   舵机 86.7° → joint7_left = -0.025 → 两指**合拢**（4 mm）
-#: 86.7° 是 URDF 下限对应的角度，再小就超限（超限会让 MoveIt 判整机状态非法）。
-#: 2026-11-03 夹爪拆装后重标（卸力手推实测）：闭合 86.7°、全开 174.8°。
-#: 旧值 21.9°/100° 会把舵机顶死 —— 零位偏移了约 65°。
-GRIP_CLOSED_DEG, GRIP_OPEN_DEG = 86.7, 174.8
-#: 2026-11-03 拆装后手推实测：舵机 86.7° -> 4 mm，174.8° -> 65 mm
-GAP_MIN_MM, GAP_MAX_MM = 8.0, 65.0
+#: 夹爪端点/开度全部来自 config/robot.json。
+#: 2026-11-03 拆装后重标：闭合 86.7° / 4 mm，全开 174.8° / 65 mm。
+#: 旧值 21.9°/100°、8~57 mm 会把舵机顶死。
+GRIP_CLOSED_DEG, GRIP_OPEN_DEG = params.CLOSE, params.OPEN
+GAP_MIN_MM, GAP_MAX_MM = params.GMIN, params.GMAX
 MAX_STEP_MM = 50.0
 
 #: 是否越过 roarm_cli.BOUNDS 的软件边界（--force 设置）。
@@ -227,8 +225,8 @@ def emit(pts, standoff_override=None, out=None):
     span = GAP_MAX_MM - GAP_MIN_MM
     grip_close = max(0.0, min(1.0, (w * 1000 - 2 - GAP_MIN_MM) / span))
     print("  张开 %.0f mm(grip %.2f)  合拢 %.0f mm(grip %.2f)  [物宽 %.0f mm]"
-          % (GAP_MIN_MM + grip_open * span, grip_open,
-             GAP_MIN_MM + grip_close * span, grip_close, w * 1000))
+          % (params.frac_to_gap_mm(grip_open), grip_open,
+             params.frac_to_gap_mm(grip_close), grip_close, w * 1000))
 
     lines = [
         "# 由 scripts/teach.py 生成 —— %s" % time_stamp(),
@@ -237,7 +235,7 @@ def emit(pts, standoff_override=None, out=None):
         "place: [%.4f, %.4f, %.4f]" % (place["x"], place["y"], place["z"]),
         "object_height: %.3f" % h,
         "object_width: %.3f" % w,
-        "grip_open: %.2f                 # 张开比例：0=8mm 1=65mm" % grip_open,
+        "grip_open: %.2f                 # 张开比例：0=4mm 1=65mm" % grip_open,
         "grip_close: %.2f                # 合拢比例：略小于物宽即可" % grip_close,
         "standoff: %.3f" % standoff,
         "clearance: 0.02",
@@ -397,10 +395,10 @@ def main():
             except ValueError:
                 print("  数值不对")
                 continue
-            # 连续开度：0 = 合拢（GRIP_CLOSED_DEG），1 = 全开（GRIP_OPEN_DEG）。
+            # 连续开度：0 = 合拢，1 = 全开。换算集中在 roarm_lib.params。
             # GripperCommand 只有一个字符串，做不到半开，所以直接发 set_angle_topic。
-            deg = GRIP_CLOSED_DEG + frac * (GRIP_OPEN_DEG - GRIP_CLOSED_DEG)
-            mm = GAP_MIN_MM + frac * (GAP_MAX_MM - GAP_MIN_MM)
+            deg = params.frac_to_servo(frac)
+            mm = params.frac_to_gap_mm(frac)
             rc, out = cli(["grip_deg", "%.1f" % deg, "--wait", "10"])
             print("  %s 舵机 %.1f° → 两指约 %.0f mm 开口%s"
                   % ("✓" if rc == 0 else "✗ rc=%d" % rc, deg, mm,

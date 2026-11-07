@@ -63,6 +63,8 @@ class uservo_ex:
     #: ⚠ 只对"当前这次装配"有效，再拆装一次要重量（两端都要量）。
     GRIP_DEG_CLOSE = 86.7
     GRIP_DEG_OPEN = 174.8
+    #: 上电启动位（度）。取约半开，旧值 50° 低于闭合角会顶死。
+    GRIP_START_DEG = 121.0
 
 
     # 参数 / Parameters:
@@ -87,11 +89,10 @@ class uservo_ex:
         # 单位是 0.1°（target_angle 的格式）；offset 全 0 时与旧行为完全一致。
         self.ZERO_ANGLE = [int(10 * o) for o in self.ZERO_OFFSET_DEG]
         # 夹爪启动位，单位 0.1°。**不参与零位标定**，只是给一个"半开"的落点。
-        # 旧值是 500（50°），旧爪 21.9°~100° 时对应约 28 mm 开度。
         # 2026-11-03 拆装后新范围是 86.7°（闭合）~174.8°（张开），
         # **50° 已经低于闭合角，启动时会硬顶 36.7° → 堵转发热。**
-        # 取 1210（121°）≈ 27.8 mm，和旧爪的"半开 28 mm"物理上一致。
-        self.ZERO_ANGLE.append(1210)
+        # 取 121° ≈ 27.8 mm，和旧爪的"半开 28 mm"物理上一致。
+        self.ZERO_ANGLE.append(int(10 * self.GRIP_START_DEG))
         self.reset_multi_turn_angle(0xff)
         time.sleep(0.1)
 
@@ -103,22 +104,16 @@ class uservo_ex:
 
     # 将角度转为米 / Convert degrees back to meters
     @classmethod
-    def degrees_to_meters(cls, degrees):
-        meters = (degrees / 100) * 0.032
-        return meters
-
-    # 将舵机角度转换为关节位置 / Servo angle to joint state mapping
-    @classmethod
     def servoangle2jointstate(cls, servo_id, servo_angle):
         if servo_id in range(6):
             # 先扣掉零位偏移，再换成弧度
             return cls.degrees_to_radians(servo_angle - cls.ZERO_OFFSET_DEG[servo_id])
         elif servo_id == 6:
             # 2026-11-03 拆装后零位偏移，旧的 (deg-100)/100*0.032 作废：
-            # 它把 100° 当全开，而实测全开在 154.1°，于是 100° 之后
+            # 它把 100° 当全开，而实测全开在 174.8°，于是 100° 之后
             # joint 会转正、超 URDF upper=0，臂就卡在"只开 10 mm"。
             # 现在按实测两端线性映射，joint 始终落在 [-0.025, 0]。
-            span = cls.GRIP_DEG_OPEN - cls.GRIP_DEG_CLOSE      # 79.1°
+            span = cls.GRIP_DEG_OPEN - cls.GRIP_DEG_CLOSE      # 88.1°
             return (servo_angle - cls.GRIP_DEG_OPEN) * (0.025 / span)
 
     # 设置角度（指定转速） / Send angle commands with specified speed
@@ -205,9 +200,20 @@ class Arm_contorl(Node):
     def set_angle_callback(self, msg):
         for i in range(len(msg.servo_id)):
             id = msg.servo_id[i]
-            # 写方向补零位偏移：URDF 角度 → 舵机角度
+            angle = float(msg.target_angle[i])
+            # 写方向补零位偏移：URDF 角度 → 舵机角度（夹爪不参与零位）
             offset = self.Servo.ZERO_OFFSET_DEG[id] if id < 6 else 0.0
-            self.target_angle[id] = int(10 * (msg.target_angle[i] + offset))
+            if id == 6:
+                # 最后一道保护：旧节点 / bag 回放可能发越界角，直接夹紧并告警。
+                clamped = min(max(angle, self.Servo.GRIP_DEG_CLOSE),
+                              self.Servo.GRIP_DEG_OPEN)
+                if abs(clamped - angle) > 1e-6:
+                    self.get_logger().warn(
+                        "夹爪目标 %.1f° 越界，已夹到 [%.1f, %.1f]°"
+                        % (angle, self.Servo.GRIP_DEG_CLOSE,
+                           self.Servo.GRIP_DEG_OPEN))
+                angle = clamped
+            self.target_angle[id] = int(10 * (angle + offset))
             if int(msg.time[i]) < 40:
                 (msg.time[i]) = 40
             self.interval[id] = int(msg.time[i])+400

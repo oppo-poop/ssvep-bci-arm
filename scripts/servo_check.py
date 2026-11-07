@@ -61,23 +61,24 @@ import statistics
 import sys
 import time
 
+from roarm_lib import params
+
 # ---------------------------------------------------------------- 常量
 
 SERVO_IDS = [0, 1, 2, 3, 4, 5, 6]
 JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4",
                "joint5", "joint6", "joint7(夹爪)"]
 
-#: 夹爪换算，2026-11-03 拆装后手推实测（与 robo_driver.GRIP_DEG_* 一致）：
+#: 夹爪换算来自 config/robot.json（2026-11-03 拆装后手推实测）：
 #:   舵机  86.7° → 两指闭合 4 mm  → joint7_left = -0.025
 #:   舵机 174.8° → 两指张开 65 mm → joint7_left =  0.000
-#: 拆装前是 21.9°/100.0°，零位偏了约 65°。
-GRIP_DEG_CLOSE = 86.7
-GRIP_DEG_OPEN = 174.8
-GRIP_POS_MIN = -0.025
-GRIP_GAP_MIN_MM = 4.0
-GRIP_GAP_MAX_MM = 65.0
+GRIP_DEG_CLOSE = params.CLOSE
+GRIP_DEG_OPEN = params.OPEN
+GRIP_POS_MIN = params.JMIN
+GRIP_GAP_MIN_MM = params.GMIN
+GRIP_GAP_MAX_MM = params.GMAX
 #: 可用角区间（比实测两端各放 5° 余量，用于发现"读数跑飞"）。
-GRIP_DEG_RANGE = (81.0, 180.0)
+GRIP_DEG_RANGE = (params.CLOSE - 5.0, params.OPEN + 5.0)
 
 #: 各舵机的读数是否应该接近 0（前六个）。这里只做"明显跑飞"的粗判，
 #: 精确的零位偏差是 zero_calib.py 的活，不是这个脚本的。
@@ -98,8 +99,8 @@ LATENCY_FAIL_MS = 60.0   # 超过这个基本等于链路要断了
 PING_WINDOW_MS = 80.0    # 等响应的窗口，超过判为没响应
 
 #: 端口与波特率（robo_driver 用 1000000，官方例程写 115200，两个都试）
-DEFAULT_PORT = "/dev/ttyUSB0"
-CANDIDATE_BAUDS = [1000000, 115200]
+DEFAULT_PORT = params.SERIAL_PORT
+CANDIDATE_BAUDS = [params.SERIAL_BAUD, 115200]
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 

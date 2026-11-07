@@ -155,25 +155,26 @@ def go_home() -> link.Result:
 
 
 # ---------------------------------------------------------------- 抓取校验
-#: 两指间距换算。**2026-11-03 拆装后卸力手推实测**：
+#: 两指间距换算。真值在 config/robot.json；这里只做派生。
+#: **2026-11-03 拆装后卸力手推实测**：
 #:   舵机  86.7°（joint7_left -0.025）→ 两指闭合 **4 mm**
 #:   舵机 174.8°（joint7_left  0.000）→ 两指张开 **65 mm**
 #: 行程 61 mm。joint 坐标仍是标准的 [-0.025, 0]，见 robo_driver.GRIP_DEG_*。
-GAP_MIN_MM = 4.0
-GAP_MAX_MM = 65.0
+GAP_MIN_MM = config.GAP_MIN_MM
+GAP_MAX_MM = config.GAP_MAX_MM
 #: 完全合拢时 joint7_left 的值（URDF 下限，未变）
-GAP_ZERO_POS = -0.025
+GAP_ZERO_POS = config.GAP_ZERO_POS
 GAP_MM_PER_M = (GAP_MAX_MM - GAP_MIN_MM) / abs(GAP_ZERO_POS)
 
 #: 夹爪舵机可用角度区间（实测）。低于 86.7° 会顶死，高于 174.8° 会撑坏爪
 #: （174.8° 已接近舵机 180° 限位）。只对当前这次装配有效；再拆装要重量。
-GRIP_DEG_MIN, GRIP_DEG_MAX = 86.7, 174.8
+GRIP_DEG_MIN, GRIP_DEG_MAX = config.GRIP_DEG_MIN, config.GRIP_DEG_MAX
 
 
 def gripper_gap_mm(pos: Optional[float]) -> Optional[float]:
     """由 joint7_left 换算两指间距（毫米）。
 
-    注意最小不是 0 而是 8 mm：夹爪合到底时两指仍有结构间隙，
+    注意最小不是 0 而是 4 mm：夹爪合到底时两指仍有结构间隙，
     所以"夹空"的判据不能用 <2 mm，要用 ≤ GAP_MIN_MM + 1。
     """
     if pos is None:
@@ -182,7 +183,7 @@ def gripper_gap_mm(pos: Optional[float]) -> Optional[float]:
 
 
 def set_grip_frac(frac: float, action: str = "grip_open") -> link.Result:
-    """按比例开夹爪：0 = 合到底(8 mm)，1 = 全开(65 mm)。
+    """按比例开夹爪：0 = 合到底(4 mm)，1 = 全开(65 mm)。
 
     为什么需要它：二值 open/close 只有 65 / 8 两档。
     张开要有度（全开可能碰到旁边的物体），合拢也要有度（合到略小于物宽即可，
@@ -198,7 +199,7 @@ def check_holding(min_gap_mm: float = GAP_MIN_MM + 1.5):
 
     返回 (True=有东西 / False=空的 / None=读不到, 说明)。
 
-    ⚠ 判据是"开口大于最小开口"。夹爪最小开口就是 8 mm（两指间的结构间隙），
+    ⚠ 判据是"开口大于最小开口"。夹爪最小开口就是 4 mm（两指间的结构间隙），
     比它更薄的物体本来也夹不住 —— 这种情况判据无从分辨，用 --no-grasp-check 跳过。
     """
     pos = link.gripper_state()
@@ -234,7 +235,7 @@ def check_grasp(object_width: float, tol_mm: float = 3.0):
     gap = gripper_gap_mm(pos)
     if gap is None:
         return None, None, "读不到 joint7_left（仿真桥没起？）"
-    # 合到底时两指仍有 8 mm 结构间隙，不能再用 "<2 mm" 判夹空
+    # 合到底时两指仍有 4 mm 结构间隙，不能再用 "<2 mm" 判夹空
     if gap <= GAP_MIN_MM + 1.0:
         return False, pos, "间距 %.1f mm（≈最小开口 %.0f mm）→ 判夹空" % (
             gap, GAP_MIN_MM)

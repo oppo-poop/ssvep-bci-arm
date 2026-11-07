@@ -64,11 +64,11 @@ private:
     if (it != msg->name.end()) {
       int index = std::distance(msg->name.begin(), it);
       double radians = msg->position[index];
-      // 转换逻辑保持原样
-      double degrees = ((radians / 0.032) * 100) + 100;
-
+      // joint7_left: 0 = 两指张开 65 mm，-0.025 = 闭合 4 mm；取中点 -0.0125。
+      // 旧公式 ((radians/0.032)*100+100) 和 80° 阈值是换爪前的口径，已作废。
+      constexpr double kGripperMidJoint = -0.0125;
       auto gripper_msg = robo_interfaces::msg::GripperCommand();
-      gripper_msg.command = (degrees >= 80) ? "open" : "close";
+      gripper_msg.command = (radians >= kGripperMidJoint) ? "open" : "close";
       
       gripper_publisher_->publish(gripper_msg);
     }

@@ -17,6 +17,12 @@ import sys
 
 import numpy as np
 
+_SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _SCRIPTS not in sys.path:
+    sys.path.insert(0, _SCRIPTS)
+
+from roarm_lib import params, paths  # noqa: E402
+
 #: 常见深度相机的设备名关键字（顺序即优先级）
 NAME_HINTS = ("realsense", "astra", "orbbec", "camera")
 
@@ -105,8 +111,15 @@ def grab_frame(w=1280, h=720, index=None, warmup=12, tries=2):
     return img
 
 
-def load_scene_z(scene_yaml, default=0.0926):
-    """从场景 yaml 读 pick 的 z（抓取平面高度，米）。读不到就用 default。"""
+def load_scene_z(scene_yaml=None, default=None):
+    """从场景 yaml 读 pick 的 z（抓取平面高度，米）。
+
+    不传参时读 data/scene_real.yaml，默认值取 config/vision.json。
+    """
+    if scene_yaml is None:
+        scene_yaml = str(paths.SCENE_REAL)
+    if default is None:
+        default = params.SCENE_Z_DEFAULT
     try:
         for line in open(scene_yaml, encoding="utf-8"):
             s = line.strip()

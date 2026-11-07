@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "arm": {
+    "default_quat": [0.5, -0.5, 0.5, -0.5],
+    "waypoints": {
+      "home": [0.479, 0.0, 0.369],
+      "start": [0.33, -0.324, 0.074],
+      "right": [0.529, 0.113, 0.246],
+      "up": [0.278, 0.0, 0.438]
+    },
+    "bounds": {
+      "x": [0.278, 0.529],
+      "y": [-0.324, 0.113],
+      "z": [0.074, 0.438]
+    },
+    "zero_offset_deg": [0.4, -0.2, -0.1, 1.3, -0.3, 0.8],
+    "park_pose_deg": [0.4, -90.6, 89.3, 2.4, -6.1, -1.7]
+  },
+  "gripper": {
+    "servo_close_deg": 86.7,
+    "servo_open_deg": 174.8,
+    "joint_closed_m": -0.025,
+    "joint_open_m": 0.0,
+    "gap_closed_mm": 4.0,
+    "gap_open_mm": 65.0,
+    "start_deg": 121.0
+  },
+  "serial": {
+    "port": "/dev/ttyUSB0",
+    "baud": 1000000
+  }
+}

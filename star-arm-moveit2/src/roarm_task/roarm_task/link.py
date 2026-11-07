@@ -134,9 +134,9 @@ def grip_deg(deg: float, action: str = "grip_deg") -> Result:
 
     `GripperCommand.msg` 只有 string，做不到连续开度；这条走 set_angle_topic。
 
-    ⚠ `--tol` 必须收到 1.5 mm。默认 5 mm 时实测过：目标 48 mm、夹爪只走到 56.8 mm
+    ⚠ `--tol` 必须收到 3 mm。默认 5 mm 时实测过：目标 48 mm、夹爪只走到 56.8 mm
     （误差 4.7 mm）就被判"到位"，而物体 50 mm —— 两指根本没碰到，夹空。
-    依据：78.1° 走 57 mm，1° ≈ 0.73 mm；舵机死区 0.5~0.8° ≈ 0.4~0.6 mm。
+    依据：新爪 88.1° 走 61 mm，1° ≈ 0.69 mm；舵机死区 0.5~0.8° ≈ 0.4~0.6 mm。
     """
     # 同 grip()：按比例闭合夹着物料时到不了目标，长 wait 只会白等。
     argv = ["grip_deg", "%.1f" % deg, "--wait", "4", "--tol", "3.0"]
@@ -144,7 +144,7 @@ def grip_deg(deg: float, action: str = "grip_deg") -> Result:
 
 
 def gripper_state() -> Optional[float]:
-    """读 joint7_left 实际位置（米）。0 = 两指合拢，-0.025 = 全开。"""
+    """读 joint7_left 实际位置（米）。0 = 两指张开（65 mm），-0.025 = 合拢（4 mm）。"""
     res = call(["where"], "where", timeout=25)
     if not res.ok:
         return None

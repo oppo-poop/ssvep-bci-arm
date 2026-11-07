@@ -154,7 +154,7 @@ def _pick_steps(sc: "Scene", with_home: bool = True) -> List[Step]:
     if with_home:
         steps.append(Step("回位待命", Phase.PREPARE, primitives.go_home))
     steps += [
-        # 先张开到场景指定的开度：二值命令只有 65 / 8 mm 两档，
+        # 先张开到场景指定的开度：二值命令只有 65 / 4 mm 两档，
         # 下探时全开可能碰到旁边的物体，也不能随物体大小调整。
         Step("张开夹爪", Phase.PREPARE,
              lambda: primitives.set_grip_frac(sc.grip_open)),

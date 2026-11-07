@@ -149,9 +149,12 @@ def _selftest():
 
     here = os.path.dirname(os.path.abspath(__file__))
     roots = [
-        os.path.join(here, "..", "..", ".."),                  # 项目里
-        "/home/ljl/桌面/brain_extract/brain/vision",           # 队友的包
+        os.path.join(here, "..", "..", ".."),                  # 项目根
+        os.path.join(here, "..", "..", "..", "data", "vision"),
     ]
+    base = os.environ.get("TEAMMATE_VISION_DIR")
+    if base:
+        roots.insert(0, base)
     imgs = []
     for r in roots:
         imgs = sorted(glob.glob(os.path.join(r, "calib_images", "calib_0[0-2].png")))
