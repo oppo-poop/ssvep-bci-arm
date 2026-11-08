@@ -14,6 +14,9 @@ import 进来，逐点比较它和 `roarm_lib.params` 的结果。
     1. 角度 → 间距 / joint：与 params 一致（含曲线，线性和曲线在此差距 >5 mm）
     2. joint → 角度：反算一致
     3. 端点：0° → 1.6 mm，-100° → 50.9 mm
+    4. 曲线不退化成线性
+    5. **启动驱零位那条命令真的能打包**（`arm_move_by_time`）——
+       2026-11-08 的 NameError 就是这一节抓的，前四节都看不出来
 
 用法
     python3 scripts/checks/grip_math_check.py
@@ -71,6 +74,104 @@ def _load_driver():
     return mod
 
 
+def _check_arm_move_by_time(mod, bad):
+    """启动驱零位那条命令到底能不能打包发出去。
+
+    为什么单独查这个
+        2026-11-08 真机启动"没反应、臂不动"：`arm_move_by_time()` 里用了
+        `os.environ`，而文件顶部漏了 `import os` → NameError。这条路径是
+        **上电第一件事**，一挂就整机不动，而 driver 的 main() 当时把异常
+        吞了，launch 只打一句 "process has finished cleanly"，现场完全看不出。
+        只比对常量（grip_check）或只算换算（本文件前几节）都抓不到这类
+        "代码路径本身跑不起来"。这里直接调一次，让它真打包。
+
+    用假 self，不构造 ROS 节点、不开串口。
+    """
+    class _FakeServo:
+        SRV_NUM = 7
+        GRIP_POWER_MW = 12000
+
+        def __init__(self):
+            self.calls = []
+
+        def set_angle_by_interval(self, size, data_list):
+            self.calls.append((size, list(data_list)))
+
+    class _FakeSelf:
+        def __init__(self):
+            self.Servo = _FakeServo()
+            self.interval = [3000] * 7
+            # 零位目标：6 个臂关节的 offset(0.1°) + 夹爪基准 167.7°
+            self.target_angle = [4, -2, -1, 13, -3, 8, 1677]
+
+    # arm_move_by_time 是 Arm_contorl 的方法（不是 uservo_ex 的）
+    def _arm_move(slf):
+        mod.Arm_contorl.arm_move_by_time(slf)
+
+    fake = _FakeSelf()
+    try:
+        _arm_move(fake)
+    except Exception as exc:                        # noqa: BLE001
+        bad.append("arm_move_by_time 抛异常：%s: %s" % (type(exc).__name__, exc))
+        print("  arm_move_by_time 直接调用                ✗ %s: %s"
+              % (type(exc).__name__, exc))
+        return
+
+    calls = fake.Servo.calls
+    ok = len(calls) == 1 and calls[0][0] == 7 and len(calls[0][1]) == 7
+    if not ok:
+        bad.append("arm_move_by_time 应发 1 条 7 帧命令，实际 %d 条" % len(calls))
+        print("  打包成 1 条 7 舵机命令                  ✗ 实际 %d 条" % len(calls))
+        return
+
+    size, frames = calls[0]
+    # 逐帧解包：B=id, l=目标(0.1°), L=时长ms, H=加减速, H, H=功率
+    import struct as _struct
+    bad_frames = []
+    for i, raw in enumerate(frames):
+        if len(raw) != 15:
+            bad_frames.append("第 %d 帧长度 %d≠15" % (i, len(raw)))
+            continue
+        sid, tgt, itv, acc1, acc2, pwr = _struct.unpack("<BlLHHH", raw)
+        if sid != i:
+            bad_frames.append("第 %d 帧 id=%d" % (i, sid))
+        if itv != 3000 or acc1 != 1500 or acc2 != 1500:
+            bad_frames.append("第 %d 帧 时长/加速=%d/%d/%d（应 3000/1500/1500）"
+                              % (i, itv, acc1, acc2))
+        if pwr != 12000:
+            bad_frames.append("第 %d 帧 功率=%d mW（应 12000）" % (i, pwr))
+    if bad_frames:
+        bad.append("启动命令帧不对：" + "；".join(bad_frames))
+        for b in bad_frames:
+            print("  " + b)
+    else:
+        print("  arm_move_by_time 打包 7 帧 15 字节        ✓ 时长 3000 / acc 1500 / 功率 12000")
+
+    # 环境变量覆盖必须生效（这条 line 就是害死启动的那行 os.environ）
+    import os as _os
+    old = _os.environ.get("CELLO_POWER_MW")
+    try:
+        _os.environ["CELLO_POWER_MW"] = "9000"
+        fake2 = _FakeSelf()
+        try:
+            _arm_move(fake2)
+        except Exception as exc:                    # noqa: BLE001
+            bad.append("CELLO_POWER_MW 覆盖时抛异常：%s" % exc)
+            print("  CELLO_POWER_MW 覆盖 9000               ✗ %s" % exc)
+            return
+        pwr = _struct.unpack("<BlLHHH", fake2.Servo.calls[0][1][0])[5]
+        ok = pwr == 9000
+        if not ok:
+            bad.append("CELLO_POWER_MW=9000 没生效（帧里是 %d）" % pwr)
+        print("  CELLO_POWER_MW=9000 生效                %s 帧里 %d mW"
+              % ("✓" if ok else "✗", pwr))
+    finally:
+        if old is None:
+            _os.environ.pop("CELLO_POWER_MW", None)
+        else:
+            _os.environ["CELLO_POWER_MW"] = old
+
+
 def main():
     mod = _load_driver()
     S = mod.uservo_ex
@@ -117,6 +218,9 @@ def main():
     if not ok:
         bad.append("曲线失效：半开 %.1f mm ≈ 线性 %.1f mm" % (mid, linear))
     print("  半开 %.1f mm < 线性 %.1f mm - 5 %s" % (mid, linear, "✓" if ok else "✗"))
+
+    # 5) 启动驱零位那条命令必须真的能打包（见 _check_arm_move_by_time 的注释）
+    _check_arm_move_by_time(mod, bad)
 
     if bad:
         print("\n✗ 有 %d 处不一致：" % len(bad))

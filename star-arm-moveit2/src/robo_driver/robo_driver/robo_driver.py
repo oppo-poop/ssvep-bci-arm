@@ -11,6 +11,8 @@ from robo_interfaces.msg import SetAngle
 import struct
 from sensor_msgs.msg import JointState
 import math
+import os
+import sys
 import fashionstar_uart_sdk as uservo
 import time
 import serial
@@ -394,8 +396,23 @@ def main(args=None):
     rclpy.init(args=args)
     try:
         robo_driver_node = Arm_contorl()
-    except Exception as e:
-        return
+    except Exception:                                   # noqa: BLE001
+        # ⚠ 这里**绝对不能静默 return**。初始化一挂，臂就完全不动，而 launch 只会
+        #   打一句 "process has finished cleanly"（退出码 0），现场表现是
+        #   "启动没反应、臂不动"，看不出任何原因 —— 2026-11-08 就是这么把
+        #   arm_move_by_time 里一个 NameError（漏 import os）藏了一整天，
+        #   中间还查了串口、查了日志、怀疑过 ^C。
+        #   打到 stderr + 非 0 退出：launch 报 "process has died"，
+        #   robot_up.sh 的启动检查也能立刻失败，而不是干等 move_group。
+        import traceback
+        traceback.print_exc()
+        print("[robo_driver] 初始化失败，进程退出（臂不会动）。看上面的 traceback。",
+              file=sys.stderr, flush=True)
+        try:
+            rclpy.try_shutdown()
+        except Exception:                               # noqa: BLE001
+            pass
+        sys.exit(1)
 
     try:
         rclpy.spin(robo_driver_node)

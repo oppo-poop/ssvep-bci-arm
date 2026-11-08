@@ -86,6 +86,15 @@ wait_for_log() {
       ok "$name 就绪（${i}s）"
       return 0
     fi
+    # 进程已经退出就别干等到超时：2026-11-08 driver 初始化抛异常，
+    # launch 只写一句 "process has finished cleanly"，脚本闷等 20 s 不吭声，
+    # 现场看到的就是"启动没反应"。这里立刻报错并把日志尾部打出来。
+    if [ -f "$file" ] && grep -aqE "process has died|process has finished cleanly" \
+         "$file" 2>/dev/null; then
+      err "$name 进程已退出（启动失败）。日志尾部（$file）："
+      tail -n 15 "$file" | sed 's/^/    /'
+      return 1
+    fi
     sleep 1
   done
   err "$name 在 ${timeout}s 内没有就绪，看 $file"
