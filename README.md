@@ -229,6 +229,7 @@ ros2 run roarm_task task --scene data/scene_real.yaml
 
 ```bash
 # 确认工作区无人、无障碍，电源开关在手边
+# ⚠ 上电前把夹爪两指拨到**合拢**：起栈位置会被当作 0° 基准（2026-11-08 起的口径）
 bash scripts/robot_up.sh
 
 # 上电后不自动驱零位，仅上力矩

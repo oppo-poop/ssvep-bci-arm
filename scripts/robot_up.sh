@@ -215,6 +215,9 @@ start_all() {
   #   历史：原来 1.5 s，折叠态展开 90° 太猛，2026-11-02 上升到一半失力回落。
   # ZERO_ON_START=false：只上力矩保持原姿态，之后由本脚本用 MoveIt 慢速回零。
   local zero_start="${ZERO_ON_START:-true}"
+  # 2026-11-08：夹爪改成"相对起栈基准"的口径 —— 起栈时把**当前角度**记为 0°。
+  # 所以上电前两指必须是**合拢**状态，否则 0° 就成了"张开"，之后 close 会原地不动。
+  msg "⚠ 上电前确认夹爪两指是**合拢**的（起栈位被当作 0° 基准）"
   msg "启动 driver…（zero_on_start=${zero_start}）"
   setsid ros2 launch cello_moveit_config driver.launch.py \
     zero_on_start:="$zero_start" > "$DRVLOG" 2>&1 &
