@@ -2070,12 +2070,12 @@ def main():
     print("\n[4/7] 闭合夹爪")
     if lv is not None:
         lv.set_status("[4/7] closing grip")
-    # wait 给 4 秒，**不是 20 秒**。
-    # 闭合的期望值是"两指到底"（joint7_left = -0.025，4 mm），但夹着物料时
-    # 根本到不了 —— 爪会停在物宽处（50 mm 物料约 48 mm），误差 44 mm 永远超容差。
+    # wait 取 GRIP_WAIT（5 s），**不是 20 秒**。
+    # 闭合的期望值是"两指到底"（joint7_left = -0.025，约 1.6 mm），但夹着物料时
+    # 根本到不了 —— 爪会停在物宽处（50 mm 物料约 50 mm），误差永远超容差。
     # 原来给 20 秒，于是**每次抓取都白等 20 秒**才返回"未到位"，
     # 而下面紧接着就把 2~22 mm 的误差判成"抓稳"了 —— 说明本来就预期到不了。
-    # 空爪到底只需 0.7 秒（舵机 time=1000ms），4 秒足够。
+    # 空爪到底要 3.4 秒（move_ms 3000 + 驱动 400 ms 缓冲），5 秒刚好留一点余量。
     _t = time.perf_counter()
     rc, err = cli_grip("close")
     record("pick_grip_close", time.perf_counter() - _t)
