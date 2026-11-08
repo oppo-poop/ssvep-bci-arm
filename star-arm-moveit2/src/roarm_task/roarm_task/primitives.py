@@ -210,9 +210,12 @@ def check_holding(min_gap_mm: float = GAP_MIN_MM + 1.5):
         return False, "开口 %.1f mm（≈最小开口 %.0f mm），判定手上没东西" % (
             gap, GAP_MIN_MM)
     # 全开也是一种"没夹东西"：上一轮 pick 失败会停在张开状态。
-    # 阈值取 GAP_MAX-1，这样夹 60 mm 的物体（gap=60）仍判"有东西"。
-    if gap >= GAP_MAX_MM - 1.0:
-        return False, "开口 %.1f mm（≈全开 %.0f mm），判定手上没东西" % (
+    # ⚠ 这里原来是 GAP_MAX_MM - 1，2026-11-08 改成 -0.5：这副爪全开只有 50.9 mm，
+    #   而物料宽 50 mm，夹住之后 gap 正好 50.0 —— 用 -1 的阈值（49.9）会把
+    #   "夹着 50 mm 物料"判成"全开、手上没东西"，place 直接拒绝。
+    #   余量只有 0.9 mm，阈值再松一点就两头分不开了。
+    if gap >= GAP_MAX_MM - 0.5:
+        return False, "开口 %.1f mm（≈全开 %.1f mm），判定手上没东西" % (
             gap, GAP_MAX_MM)
     return True, "开口 %.1f mm，判定夹着东西" % gap
 

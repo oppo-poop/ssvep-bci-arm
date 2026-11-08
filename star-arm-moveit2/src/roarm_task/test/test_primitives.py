@@ -101,6 +101,27 @@ class TestGraspCheck(unittest.TestCase):
         self.assertIsNone(grabbed)
 
 
+class TestHolding(unittest.TestCase):
+    """check_holding 的两条边界。
+
+    这副爪全开 50.9 mm、物料 50 mm，夹住后 gap≈50.0 —— 旧的 `GAP_MAX-1` 阈值
+    会把"夹着 50 mm 物料"判成"全开没东西"，`--phase place` 直接拒绝。
+    """
+
+    def test_fifty_mm_object_counts_as_held(self):
+        # 50 mm 间距 → 对应的 joint7_left
+        j = config.P.servo_to_joint(config.P.deg_of_gap(50.0))
+        with patch.object(link, "gripper_state", return_value=j):
+            holding, note = primitives.check_holding()
+        self.assertTrue(holding, note)
+
+    def test_fully_open_counts_as_empty(self):
+        with patch.object(link, "gripper_state", return_value=config.P.JMAX):
+            holding, note = primitives.check_holding()
+        self.assertFalse(holding)
+        self.assertIn("没东西", note)
+
+
 class TestScene(unittest.TestCase):
     def test_default_scene_valid(self):
         self.assertEqual(Scene.default().problems(), [])
