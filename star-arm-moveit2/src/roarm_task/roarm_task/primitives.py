@@ -156,41 +156,39 @@ def go_home() -> link.Result:
 
 # ---------------------------------------------------------------- 抓取校验
 #: 两指间距换算。真值在 config/robot.json；这里只做派生。
-#: **2026-11-03 拆装后卸力手推实测**：
-#:   舵机  86.7°（joint7_left -0.025）→ 两指闭合 **4 mm**
-#:   舵机 174.8°（joint7_left  0.000）→ 两指张开 **65 mm**
-#: 行程 61 mm。joint 坐标仍是标准的 [-0.025, 0]，见 robo_driver.GRIP_DEG_*。
+#: **2026-11-07 队友标定（夹爪修复后换了几何）**：
+#:   0°（joint7_left -0.025）→ 两指合拢 **1.6 mm**
+#:   -100°（joint7_left 0.000）→ 两指张开 **50.9 mm**（机械极限）
+#: 角度→间距是二次曲线（前 40° 基本空程），一律走 params，别在这里写线性公式。
 GAP_MIN_MM = config.GAP_MIN_MM
 GAP_MAX_MM = config.GAP_MAX_MM
 #: 完全合拢时 joint7_left 的值（URDF 下限，未变）
 GAP_ZERO_POS = config.GAP_ZERO_POS
-GAP_MM_PER_M = (GAP_MAX_MM - GAP_MIN_MM) / abs(GAP_ZERO_POS)
 
-#: 夹爪舵机可用角度区间（实测）。低于 86.7° 会顶死，高于 174.8° 会撑坏爪
-#: （174.8° 已接近舵机 180° 限位）。只对当前这次装配有效；再拆装要重量。
+#: 夹爪舵机可用角度区间（相对基准，含方向）。超区间会顶死或撑坏爪。
 GRIP_DEG_MIN, GRIP_DEG_MAX = config.GRIP_DEG_MIN, config.GRIP_DEG_MAX
 
 
 def gripper_gap_mm(pos: Optional[float]) -> Optional[float]:
     """由 joint7_left 换算两指间距（毫米）。
 
-    注意最小不是 0 而是 4 mm：夹爪合到底时两指仍有结构间隙，
+    注意最小不是 0 而是 1.6 mm：夹爪合到底时两指仍有结构间隙，
     所以"夹空"的判据不能用 <2 mm，要用 ≤ GAP_MIN_MM + 1。
     """
     if pos is None:
         return None
-    return GAP_MIN_MM + (pos - GAP_ZERO_POS) * GAP_MM_PER_M
+    return float(config.P.gap_mm_from_joint(pos))
 
 
 def set_grip_frac(frac: float, action: str = "grip_open") -> link.Result:
-    """按比例开夹爪：0 = 合到底(4 mm)，1 = 全开(65 mm)。
+    """按比例开夹爪：0 = 合到底，1 = 全开。
 
-    为什么需要它：二值 open/close 只有 65 / 8 两档。
+    为什么需要它：`grip open/close` 只有两档。
     张开要有度（全开可能碰到旁边的物体），合拢也要有度（合到略小于物宽即可，
     合到底会让舵机长时间堵转）。
     """
     frac = max(0.0, min(1.0, float(frac)))
-    deg = GRIP_DEG_MIN + frac * (GRIP_DEG_MAX - GRIP_DEG_MIN)
+    deg = float(config.P.frac_to_servo(frac))
     return _run(action, lambda: link.grip_deg(deg, action=action))
 
 

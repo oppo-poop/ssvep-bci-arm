@@ -69,16 +69,23 @@ SERVO_IDS = [0, 1, 2, 3, 4, 5, 6]
 JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4",
                "joint5", "joint6", "joint7(夹爪)"]
 
-#: 夹爪换算来自 config/robot.json（2026-11-03 拆装后手推实测）：
-#:   舵机  86.7° → 两指闭合 4 mm  → joint7_left = -0.025
-#:   舵机 174.8° → 两指张开 65 mm → joint7_left =  0.000
+#: 夹爪换算来自 config/robot.json（2026-11-07 队友标定，夹爪修复后）。
+#: ⚠ 角度是**相对起栈基准**的偏移，不是绝对舵机角：
+#:   0°    → 两指合拢 1.6 mm → joint7_left = -0.025
+#:   -100° → 两指张开 50.9 mm → joint7_left =  0.000
+#: 本脚本读的是**舵机绝对角**，所以要么给 `CELLO_GRIP_BASE=<基准角>`
+#: （起栈日志里打印的那个"基准=xx.x°"），要么只能看相对差值。
 GRIP_DEG_CLOSE = params.CLOSE
 GRIP_DEG_OPEN = params.OPEN
 GRIP_POS_MIN = params.JMIN
 GRIP_GAP_MIN_MM = params.GMIN
 GRIP_GAP_MAX_MM = params.GMAX
-#: 可用角区间（比实测两端各放 5° 余量，用于发现"读数跑飞"）。
-GRIP_DEG_RANGE = (params.CLOSE - 5.0, params.OPEN + 5.0)
+#: 基准角（度）。想按绝对读数判断开度就必须给，否则 gap 只是相对量。
+GRIP_BASE_DEG = float(os.environ.get("CELLO_GRIP_BASE", "0") or 0)
+#: 可用角区间（相对基准，两端各放 5° 余量，用于发现"读数跑飞"）。
+_R_LO = min(GRIP_DEG_CLOSE, GRIP_DEG_OPEN) - 5.0
+_R_HI = max(GRIP_DEG_CLOSE, GRIP_DEG_OPEN) + 5.0
+GRIP_DEG_RANGE = (_R_LO + GRIP_BASE_DEG, _R_HI + GRIP_BASE_DEG)
 
 #: 各舵机的读数是否应该接近 0（前六个）。这里只做"明显跑飞"的粗判，
 #: 精确的零位偏差是 zero_calib.py 的活，不是这个脚本的。
@@ -394,10 +401,12 @@ def read_one(mgr, sid, samples=1, ping_only=False):
 
 
 def grip_gap_mm(deg):
-    """舵机角度 → 夹爪开度（mm）。与 robo_driver.servoangle2jointstate 一致。"""
-    pos = (deg - GRIP_DEG_OPEN) * (0.025 / (GRIP_DEG_OPEN - GRIP_DEG_CLOSE))
-    ratio = (pos - GRIP_POS_MIN) / (0.0 - GRIP_POS_MIN)
-    return GRIP_GAP_MIN_MM + ratio * (GRIP_GAP_MAX_MM - GRIP_GAP_MIN_MM)
+    """舵机绝对角 → 夹爪开度（mm）。换算与 robo_driver.servoangle2jointstate 一致。
+
+    ⚠ 先减基准角（`CELLO_GRIP_BASE`，见上）；不给基准时等于假设基准 0，
+    结果只能当相对量看。
+    """
+    return float(params.gap_mm_from_servo(float(deg) - GRIP_BASE_DEG))
 
 
 def scan_extra(mgr, lo=7, hi=16):

@@ -37,28 +37,47 @@ def radians_to_degrees(radians):
     return radians * (180 / math.pi)
 
 
-# 夹爪端点：与 config/robot.json 一致，由 scripts/checks/grip_check.py 强制检查。
-# 2026-11-03 拆装后卸力手推实测：86.7°=闭合 4 mm（joint -0.025），
-# 174.8°=张开 65 mm（joint 0.000）。旧的 32 mm 行程公式已作废。
-GRIP_DEG_CLOSE = 86.7
-GRIP_DEG_OPEN = 174.8
+# 夹爪口径：与 config/robot.json 一致，由 scripts/checks/grip_check.py 强制检查。
+# 2026-11-07 队友标定（夹爪修复后）：角度是**相对起栈基准**的偏移，不是绝对舵机角。
+#   0°    = 基准位（合拢，joint -0.025，两指 1.6 mm）
+#   -100° = 再张 100°（全开，joint 0.000，两指 50.9 mm）
+# 角度→间距是二次曲线（前 40° 基本空程），别退回线性。
+GRIP_DEG_CLOSE = 0.0
+GRIP_DEG_OPEN = -100.0
+GRIP_FULL_MM = 50.9
+GRIP_CURVE_K = 0.412
+GRIP_GAP_MIN_MM = 1.6
 GRIP_JOINT_MIN = -0.025
 GRIP_JOINT_MAX = 0.0
 GRIP_SERVO_SPAN = GRIP_DEG_OPEN - GRIP_DEG_CLOSE
 GRIP_JOINT_SPAN = GRIP_JOINT_MAX - GRIP_JOINT_MIN
 
 
+def _grip_shape_inv(y):
+    """间距形状 0..1 → 归一化开度。解 (1−k)x² + kx − y = 0。"""
+    y = max(0.0, min(1.0, float(y)))
+    k = GRIP_CURVE_K
+    a = 1.0 - k
+    if abs(a) < 1e-9:
+        return y
+    return max(0.0, min(1.0, (-k + math.sqrt(max(0.0, k * k + 4.0 * a * y)))
+                         / (2.0 * a)))
+
+
 def jointstate2servoangle(servo_id, joint_state):
     """关节状态转舵机命令角度 / joint state to servo angle
 
     臂关节只做弧度→度；零位偏移由 robo_driver 在写方向补回，往返抵消。
-    joint7 必须用实测端点反算，否则取消时的"保持当前角度"会把夹爪打错位置。
+    joint7 必须用实测曲线反算，否则取消时的"保持当前角度"会把夹爪打错位置。
+    注意：这里算出的是**相对基准**的夹爪角，基准由 robo_driver 在写方向加。
     """
     if servo_id < 6:
         return radians_to_degrees(joint_state)
     elif servo_id == 6:
-        return GRIP_DEG_CLOSE + (joint_state - GRIP_JOINT_MIN) \
-            * GRIP_SERVO_SPAN / GRIP_JOINT_SPAN
+        travel = GRIP_JOINT_SPAN
+        y = 0.0 if abs(travel) < 1e-9 else \
+            (float(joint_state) - GRIP_JOINT_MIN) / travel
+        return GRIP_DEG_CLOSE + _grip_shape_inv(y) * GRIP_SERVO_SPAN
     return 0.0
 
 

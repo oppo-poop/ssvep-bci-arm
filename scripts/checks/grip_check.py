@@ -98,6 +98,7 @@ def add(checks, name, ok, detail=""):
 def check_params(checks):
     """派生换算的端点/往返/开度。"""
     p = params
+    mid = p.frac_to_gap_mm(0.5)
     ok = (
         same(p.servo_to_joint(p.CLOSE), p.JMIN)
         and same(p.servo_to_joint(p.OPEN), p.JMAX)
@@ -109,13 +110,19 @@ def check_params(checks):
         and same(p.gap_mm_from_servo(p.OPEN), p.GMAX)
         and same(p.frac_to_servo(0.0), p.CLOSE)
         and same(p.frac_to_servo(1.0), p.OPEN)
+        # 曲线必须真的弯曲：线性会给 GMIN + span/2
+        and mid < p.GMIN + p.GAP_SPAN * 0.5 - 1.0
+        # 语义目标来回
+        and same(p.gap_mm_from_servo(p.deg_of_gap(p.OPEN_TARGET_MM)),
+                 p.OPEN_TARGET_MM, 1e-6)
+        and p.GRIP_DEG_MIN <= p.deg_of_gap(p.OPEN_TARGET_MM) <= p.GRIP_DEG_MAX
         and p.GRIP_EXPECT_CLI["open"] == p.JMAX
         and p.GRIP_EXPECT_CLI["close"] == p.JMIN
         and p.GRIP_EXPECT["close_fingers"] == p.JMIN
         and p.GRIP_EXPECT["open_fingers"] == p.JMAX
     )
     add(checks, "params 派生量", ok,
-        "端点/往返/比例换算" if ok else "端点映射不是线性往返")
+        "端点/往返/曲线/比例换算" if ok else "端点映射或曲线不对（半开 %.1f mm）" % mid)
 
 
 def check_task_modules(checks):
@@ -131,15 +138,15 @@ def check_task_modules(checks):
     cmin = getattr(task_config, "GRIP_DEG_MIN", None)
     cmax = getattr(task_config, "GRIP_DEG_MAX", None)
     add(checks, "roarm_task/config 端点",
-        same(cmin, params.CLOSE) and same(cmax, params.OPEN),
+        same(cmin, params.GRIP_DEG_MIN) and same(cmax, params.GRIP_DEG_MAX),
         "%.1f/%.1f" % (cmin, cmax) if cmin is not None else "未定义 GRIP_DEG_MIN/MAX")
     add(checks, "roarm_task/config GRIP_EXPECT",
         same(task_config.GRIP_EXPECT["close_fingers"], params.JMIN)
         and same(task_config.GRIP_EXPECT["open_fingers"], params.JMAX),
         str(task_config.GRIP_EXPECT))
     add(checks, "roarm_task/primitives 端点",
-        same(primitives.GRIP_DEG_MIN, params.CLOSE)
-        and same(primitives.GRIP_DEG_MAX, params.OPEN),
+        same(primitives.GRIP_DEG_MIN, params.GRIP_DEG_MIN)
+        and same(primitives.GRIP_DEG_MAX, params.GRIP_DEG_MAX),
         "%.1f/%.1f" % (primitives.GRIP_DEG_MIN, primitives.GRIP_DEG_MAX))
     add(checks, "roarm_task/primitives 开度",
         same(primitives.GAP_MIN_MM, params.GMIN)
@@ -160,48 +167,67 @@ def check_task_modules(checks):
 def check_vendor_constants(checks, src):
     p = params
     d = src["driver"]
-    add(checks, "robo_driver 端点",
-        same(grab_num(d, r"GRIP_DEG_CLOSE\s*=\s*([\d.]+)"), p.CLOSE)
-        and same(grab_num(d, r"GRIP_DEG_OPEN\s*=\s*([\d.]+)"), p.OPEN),
-        "close=%s open=%s" % (
-            grab_num(d, r"GRIP_DEG_CLOSE\s*=\s*([\d.]+)"),
-            grab_num(d, r"GRIP_DEG_OPEN\s*=\s*([\d.]+)")))
+    d_close = grab_num(d, r"GRIP_DEG_CLOSE\s*=\s*(-?[\d.]+)")
+    d_open = grab_num(d, r"GRIP_DEG_OPEN\s*=\s*(-?[\d.]+)")
+    d_full = grab_num(d, r"GRIP_FULL_MM\s*=\s*(-?[\d.]+)")
+    d_k = grab_num(d, r"GRIP_CURVE_K\s*=\s*(-?[\d.]+)")
+    d_gmin = grab_num(d, r"GRIP_GAP_MIN_MM\s*=\s*(-?[\d.]+)")
+    add(checks, "robo_driver 端点/曲线",
+        same(d_close, p.CLOSE) and same(d_open, p.OPEN)
+        and same(d_full, p.GMAX) and same(d_k, p.CURVE_K)
+        and same(d_gmin, p.GMIN),
+        "close=%s open=%s full=%s k=%s gmin=%s"
+        % (d_close, d_open, d_full, d_k, d_gmin))
 
-    start = grab_num(d, r"GRIP_START_DEG\s*=\s*([\d.]+)")
-    if start is None:
-        raw = grab_num(d, r"ZERO_ANGLE\.append\((\d+)\)")
-        start = raw / 10.0 if raw is not None else None
-    add(checks, "robo_driver 启动位", same(start, p.START_DEG),
-        "%.1f°" % start if start is not None else "找不到启动位")
+    # 起栈位：None = 原地不动（读回当前角），这是唯一安全做法
+    has_none = d is not None and re.search(
+        r"GRIP_START_DEG\s*=\s*None", d) is not None
+    start = grab_num(d, r"GRIP_START_DEG\s*=\s*(-?[\d.]+)")
+    if p.START_DEG is None:
+        add(checks, "robo_driver 启动位", has_none,
+            "原地不动（None）" if has_none else "写死了绝对角 %s，会绕圈" % start)
+    else:
+        add(checks, "robo_driver 启动位", same(start, p.START_DEG),
+            "%.1f°" % start if start is not None else "找不到启动位")
 
     zero = grab_list(d, r"ZERO_OFFSET_DEG\s*=\s*\[([^\]]+)\]")
     add(checks, "robo_driver 零位偏移", zero == p.ZERO_OFFSET_DEG,
         str(zero))
 
+    # 多圈复位只能动 6 号：0xff 广播这类舵机不认，等于没复位
+    # （注释里可以提到 0xff，只查代码行）
+    code_lines = [ln.split("#", 1)[0] for ln in (d or "").splitlines()]
+    code = "\n".join(code_lines)
+    add(checks, "robo_driver 只复位夹爪多圈",
+        re.search(r"reset_multi_turn_angle\(0xff\)", code) is None
+        and re.search(r"reset_multi_turn_angle\(6\)", code) is not None,
+        "代码里仍在广播 0xff" if re.search(r"reset_multi_turn_angle\(0xff\)",
+                                          code) else "ok")
+
     cpp = src["cpp"]
-    # 这两个名字是历史反的：kServoClosed 实际是"张开"，看值不看名
+    cpp_close = grab_num(cpp, r"kGripCloseDeg\s*=\s*(-?[\d.]+)")
+    cpp_open = grab_num(cpp, r"kGripOpenDeg\s*=\s*(-?[\d.]+)")
     add(checks, "arm_moveit_write.cpp 端点",
-        same(grab_num(cpp, r"kServoOpened\s*=\s*([\d.]+)"), p.CLOSE)
-        and same(grab_num(cpp, r"kServoClosed\s*=\s*([\d.]+)"), p.OPEN),
-        "close=%s open=%s" % (
-            grab_num(cpp, r"kServoOpened\s*=\s*([\d.]+)"),
-            grab_num(cpp, r"kServoClosed\s*=\s*([\d.]+)")))
+        same(cpp_close, p.CLOSE) and same(cpp_open, p.OPEN),
+        "close=%s open=%s" % (cpp_close, cpp_open))
 
     ctrl = src["controller"]
+    ctrl_close = grab_num(ctrl, r"GRIP_DEG_CLOSE\s*=\s*(-?[\d.]+)")
+    ctrl_open = grab_num(ctrl, r"GRIP_DEG_OPEN\s*=\s*(-?[\d.]+)")
     add(checks, "cello_controller 端点常量",
-        same(grab_num(ctrl, r"GRIP_DEG_CLOSE\s*=\s*([\d.]+)"), p.CLOSE)
-        and same(grab_num(ctrl, r"GRIP_DEG_OPEN\s*=\s*([\d.]+)"), p.OPEN)
+        same(ctrl_close, p.CLOSE) and same(ctrl_open, p.OPEN)
+        and same(grab_num(ctrl, r"GRIP_CURVE_K\s*=\s*(-?[\d.]+)"), p.CURVE_K)
         and same(grab_num(ctrl, r"GRIP_JOINT_MIN\s*=\s*(-?[\d.]+)"), p.JMIN)
         and same(grab_num(ctrl, r"GRIP_JOINT_MAX\s*=\s*(-?[\d.]+)"), p.JMAX),
-        "stage3 已补：joint7 换算用实测端点")
+        "close=%s open=%s" % (ctrl_close, ctrl_open))
 
     bag = src["bag"]
+    bag_close = grab_num(bag, r"kGripCloseDeg\s*=\s*(-?[\d.]+)")
+    bag_open = grab_num(bag, r"kGripOpenDeg\s*=\s*(-?[\d.]+)")
     add(checks, "bag_recorder 端点",
-        same(grab_num(bag, r"kServoClose\s*=\s*([\d.]+)"), p.CLOSE)
-        and same(grab_num(bag, r"kServoOpen\s*=\s*([\d.]+)"), p.OPEN),
-        "kServoClose=%s kServoOpen=%s" % (
-            grab_num(bag, r"kServoClose\s*=\s*([\d.]+)"),
-            grab_num(bag, r"kServoOpen\s*=\s*([\d.]+)")))
+        same(bag_close, p.CLOSE) and same(bag_open, p.OPEN)
+        and same(grab_num(bag, r"kGripCurveK\s*=\s*(-?[\d.]+)"), p.CURVE_K),
+        "close=%s open=%s" % (bag_close, bag_open))
 
     rd = src["read"]
     add(checks, "arm_moveit_read 半开阈值",
@@ -272,10 +298,13 @@ def main():
         "close_deg": params.CLOSE,
         "open_deg": params.OPEN,
         "span_deg": round(params.SERVO_SPAN, 2),
+        "curve_k": params.CURVE_K,
         "start_deg": params.START_DEG,
-        "start_gap_mm": round(params.gap_mm_from_servo(params.START_DEG), 1),
+        "start_gap_mm": (None if params.START_DEG is None else
+                         round(params.gap_mm_from_servo(params.START_DEG), 1)),
         "gap_min_mm": params.GMIN,
         "gap_max_mm": params.GMAX,
+        "open_target_mm": params.OPEN_TARGET_MM,
         "checks": checks,
         "problems": ["%s：%s" % (c["name"], c["detail"]) for c in bad],
         "ok": not bad,
@@ -285,11 +314,14 @@ def main():
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0 if not bad else 1
 
-    print("  真值 config/robot.json：%.1f° ~ %.1f°  |  joint %+.3f ~ %+.3f m  |  %.0f ~ %.0f mm"
+    print("  真值 config/robot.json：%.1f° ~ %.1f°（相对基准）  |  joint %+.3f ~ %+.3f m  |  %.1f ~ %.1f mm"
           % (params.CLOSE, params.OPEN, params.JMIN, params.JMAX,
              params.GMIN, params.GMAX))
-    print("  启动位 %.1f° → 约 %.1f mm" % (
-        params.START_DEG, params.gap_mm_from_servo(params.START_DEG)))
+    if params.START_DEG is None:
+        print("  起栈夹爪位：原地不动（读回当前角，不驱到固定角）")
+    else:
+        print("  启动位 %.1f° → 约 %.1f mm" % (
+            params.START_DEG, params.gap_mm_from_servo(params.START_DEG)))
     print()
     print("  %-32s %-4s %s" % ("检查项", "结果", "说明"))
     print("  " + "-" * 78)

@@ -126,8 +126,8 @@ class Scene:
 
     def describe(self) -> str:
         """场景摘要。开度同时给比例和毫米，方便和示教时的 grip 对得上。"""
-        o_mm = GAP_MIN_MM + self.grip_open * (GAP_MAX_MM - GAP_MIN_MM)
-        c_mm = GAP_MIN_MM + self.grip_close * (GAP_MAX_MM - GAP_MIN_MM)
+        o_mm = float(config.P.frac_to_gap_mm(self.grip_open))
+        c_mm = float(config.P.frac_to_gap_mm(self.grip_close))
         w_mm = self.object_width * 1000
         warn = ""
         if o_mm < w_mm + 2:

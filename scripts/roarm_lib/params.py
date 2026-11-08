@@ -9,6 +9,7 @@
 """
 
 import json
+import math
 import os
 from pathlib import Path
 
@@ -52,16 +53,31 @@ SERIAL_PORT = str(SERIAL["port"])
 SERIAL_BAUD = int(SERIAL["baud"])
 
 # ---------------------------------------------------------------- 夹爪端点
-CLOSE = float(GRIP["servo_close_deg"])      # 闭合舵机角
-OPEN = float(GRIP["servo_open_deg"])        # 张开舵机角
+# 2026-11-07 队友标定（夹爪修复后换了一套几何）。**角度是相对起栈基准的偏移量**，
+# 不是绝对舵机角：换个爪/断个电，多圈零点就变，同一个绝对角两次起栈可以一次
+# 合拢、一次张到顶。driver 起栈时读一次实际角记为 base，之后 target = base + deg。
+#
+#   0°    = 基准位（约定：起栈前两指拨到合拢）  两指 1.6 mm  joint7_left -0.025
+#   -100° = 从基准再张 100°（机械极限）         两指 50.9 mm joint7_left  0.000
+#
+# 角度→间距是二次曲线，不是线性：前 40° 基本是空程，线性映射会把中间开度算错。
+CLOSE = float(GRIP["close_deg"])            # 基准位（合拢）
+OPEN = float(GRIP["open_deg"])              # 全开（相对基准的偏移，负数）
+FULL_MM = float(GRIP["full_mm"])            # 曲线满量程（= GMAX）
+CURVE_K = float(GRIP["curve_k"])            # 曲线弯曲度，正号=前段快
 JMIN = float(GRIP["joint_closed_m"])        # 闭合 joint7_left
 JMAX = float(GRIP["joint_open_m"])          # 张开 joint7_left
 GMIN = float(GRIP["gap_closed_mm"])         # 闭合两指间距
 GMAX = float(GRIP["gap_open_mm"])           # 张开两指间距
-START_DEG = float(GRIP["start_deg"])        # 上电启动位
+START_DEG = GRIP.get("start_deg")           # None = 起栈原地不动（推荐）
+START_DEG = None if START_DEG is None else float(START_DEG)
+
+#: 语义化目标（mm）。别把 open 定在机械极限上，顶久了舵机发烫。
+OPEN_TARGET_MM = float(GRIP.get("open_target_mm", GMAX))
+CLOSE_TARGET_MM = float(GRIP.get("close_target_mm", GMIN))
 
 #: 兼容旧代码的别名
-GRIP_DEG_MIN, GRIP_DEG_MAX = CLOSE, OPEN
+GRIP_DEG_MIN, GRIP_DEG_MAX = min(CLOSE, OPEN), max(CLOSE, OPEN)
 GAP_MIN_MM, GAP_MAX_MM = GMIN, GMAX
 GAP_ZERO_POS = JMIN
 GRIP_START_DEG = START_DEG
@@ -126,15 +142,23 @@ MAX_AREA_PX = float(_DETECT.get("max_area_px", 20000.0))
 
 # ---------------------------------------------------------------- 校验
 def _validate():
-    if not CLOSE < OPEN:
-        raise ValueError("夹爪端点顺序非法：close=%.1f° >= open=%.1f°" % (CLOSE, OPEN))
+    if abs(SERVO_SPAN) < 1e-6:
+        raise ValueError("夹爪 close_deg 与 open_deg 相同（%.1f），无法归一化"
+                         % CLOSE)
     if not JMIN < JMAX:
         raise ValueError("joint7 端点顺序非法：%+.4f >= %+.4f" % (JMIN, JMAX))
     if not GMIN < GMAX:
         raise ValueError("两指间距端点顺序非法：%.1f >= %.1f mm" % (GMIN, GMAX))
-    if not CLOSE <= START_DEG <= OPEN:
+    if START_DEG is not None and not (GRIP_DEG_MIN <= START_DEG <= GRIP_DEG_MAX):
         raise ValueError("启动位 %.1f° 不在夹爪区间 [%.1f, %.1f]°"
-                         % (START_DEG, CLOSE, OPEN))
+                         % (START_DEG, GRIP_DEG_MIN, GRIP_DEG_MAX))
+    if not GRIP_DEG_MIN < GRIP_DEG_MAX:
+        raise ValueError("夹爪角度区间非法：[%.1f, %.1f]"
+                         % (GRIP_DEG_MIN, GRIP_DEG_MAX))
+    if not GMIN <= CLOSE_TARGET_MM < OPEN_TARGET_MM <= GMAX:
+        raise ValueError("夹爪目标开度非法：close=%.1f open=%.1f，须满足 "
+                         "%.1f <= close < open <= %.1f"
+                         % (CLOSE_TARGET_MM, OPEN_TARGET_MM, GMIN, GMAX))
     if len(ZERO_OFFSET_DEG) != 6:
         raise ValueError("zero_offset_deg 必须是 6 个臂关节，当前 %d 个"
                          % len(ZERO_OFFSET_DEG))
@@ -148,39 +172,76 @@ def _clamp(x, lo, hi):
     return max(lo, min(hi, float(x)))
 
 
+def _shape(x):
+    """归一化开度 0..1 → 间距形状 0..1（二次曲线，前段空程）。"""
+    x = _clamp(x, 0.0, 1.0)
+    return x * x + CURVE_K * x * (1.0 - x)
+
+
+def _shape_inv(y):
+    """间距形状 0..1 → 归一化开度。解 (1−k)x² + kx − y = 0。"""
+    y = _clamp(y, 0.0, 1.0)
+    a = 1.0 - CURVE_K
+    if abs(a) < 1e-9:
+        return y
+    return _clamp((-CURVE_K + math.sqrt(max(0.0, CURVE_K * CURVE_K
+                                          + 4.0 * a * y))) / (2.0 * a), 0.0, 1.0)
+
+
+def servo_to_frac(deg):
+    """夹爪舵机角（相对基准）→ 归一化开度 0..1。"""
+    if abs(SERVO_SPAN) < 1e-9:
+        return 0.0
+    return _clamp((float(deg) - CLOSE) / SERVO_SPAN, 0.0, 1.0)
+
+
+def frac_to_servo(frac):
+    """归一化开度 0..1（0=合拢，1=全开）→ 夹爪舵机角（相对基准）。"""
+    return CLOSE + _clamp(frac, 0.0, 1.0) * SERVO_SPAN
+
+
 def servo_to_joint(deg):
     """夹爪舵机角（度）→ joint7_left（米）。"""
-    return JMIN + (float(deg) - CLOSE) * JOINT_SPAN / SERVO_SPAN
+    return JMIN + JOINT_SPAN * _shape(servo_to_frac(deg))
 
 
 def joint_to_servo(pos_m):
     """joint7_left（米）→ 夹爪舵机角（度）。"""
-    return CLOSE + (float(pos_m) - JMIN) * SERVO_SPAN / JOINT_SPAN
+    y = (float(pos_m) - JMIN) / JOINT_SPAN if abs(JOINT_SPAN) > 1e-9 else 0.0
+    return CLOSE + _shape_inv(y) * SERVO_SPAN
 
 
 def gap_mm_from_joint(pos_m):
     """joint7_left（米）→ 两指间距（毫米）。"""
-    return GMIN + (float(pos_m) - JMIN) * GAP_SPAN / JOINT_SPAN
+    y = (float(pos_m) - JMIN) / JOINT_SPAN if abs(JOINT_SPAN) > 1e-9 else 0.0
+    return GMIN + GAP_SPAN * _shape(y)
 
 
 def gap_mm_from_servo(deg):
     """夹爪舵机角（度）→ 两指间距（毫米）。"""
-    return GMIN + (float(deg) - CLOSE) * GAP_SPAN / SERVO_SPAN
+    return GMIN + GAP_SPAN * _shape(servo_to_frac(deg))
 
 
-def frac_to_servo(frac):
-    """开度比例 0..1（0=全闭，1=全开）→ 舵机角（度）。"""
-    return CLOSE + _clamp(frac, 0.0, 1.0) * SERVO_SPAN
+def deg_of_gap(mm):
+    """两指间距（毫米）→ 夹爪舵机角（度）。语义目标用它，别手写角度。"""
+    y = (float(mm) - GMIN) / GAP_SPAN if abs(GAP_SPAN) > 1e-9 else 0.0
+    return CLOSE + _shape_inv(y) * SERVO_SPAN
 
 
 def frac_to_gap_mm(frac):
     """开度比例 0..1 → 两指间距（毫米）。"""
-    return GMIN + _clamp(frac, 0.0, 1.0) * GAP_SPAN
+    return GMIN + GAP_SPAN * _shape(frac)
+
+
+def gap_to_frac(mm):
+    """两指间距（毫米）→ 开度比例 0..1。给"按物宽算合拢量"用。"""
+    y = (float(mm) - GMIN) / GAP_SPAN if abs(GAP_SPAN) > 1e-9 else 0.0
+    return _shape_inv(y)
 
 
 def clamp_servo(deg):
     """把舵机角夹到安全区间；用于发命令前的最后一道保护。"""
-    return _clamp(deg, CLOSE, OPEN)
+    return _clamp(deg, GRIP_DEG_MIN, GRIP_DEG_MAX)
 
 
 def clamp_joint(pos_m):
@@ -200,11 +261,23 @@ def _selftest():
     assert abs(gap_mm_from_servo(OPEN) - GMAX) < eps
     assert abs(frac_to_servo(0) - CLOSE) < eps
     assert abs(frac_to_servo(1) - OPEN) < eps
+    assert abs(frac_to_gap_mm(0.0) - GMIN) < eps
+    assert abs(frac_to_gap_mm(1.0) - GMAX) < eps
+    # 曲线：中间开度不能退化成线性（线性 0.5 → 25.45 mm，曲线应更小）
+    mid = frac_to_gap_mm(0.5)
+    assert GMIN < mid < GMIN + GAP_SPAN * 0.5, "曲线没生效：%.2f mm" % mid
+    # 语义目标来回：mm → 角 → mm 要能回来
+    assert abs(gap_mm_from_servo(deg_of_gap(OPEN_TARGET_MM))
+               - OPEN_TARGET_MM) < 1e-6
+    assert GRIP_DEG_MIN <= deg_of_gap(OPEN_TARGET_MM) <= GRIP_DEG_MAX
+    assert abs(clamp_servo(GRIP_DEG_MIN - 50) - GRIP_DEG_MIN) < eps
     assert GRIP_EXPECT_CLI["open"] == JMAX and GRIP_EXPECT_CLI["close"] == JMIN
     assert GRIP_EXPECT["close_fingers"] == JMIN
     assert GRIP_EXPECT["open_fingers"] == JMAX
-    print("params selftest ok: close=%.1f° open=%.1f° gap=%.0f~%.0fmm"
-          % (CLOSE, OPEN, GMIN, GMAX))
+    print("params selftest ok: close=%.1f° open=%.1f° gap=%.1f~%.1fmm "
+          "open_target=%.1fmm(%.1f°) 中位=%.1fmm"
+          % (CLOSE, OPEN, GMIN, GMAX, OPEN_TARGET_MM,
+             deg_of_gap(OPEN_TARGET_MM), frac_to_gap_mm(0.5)))
 
 
 if __name__ == "__main__":

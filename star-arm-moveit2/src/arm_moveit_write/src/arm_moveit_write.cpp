@@ -140,33 +140,23 @@ private:
     msg.servo_id = {6};
     msg.time = {1000}; 
 
-    // ⚠ joint7_left 的换算在 robo_driver.servoangle2jointstate 里，当前是
-    //   (deg - 174.8) * 0.025/88.1，所以 86.7° -> -0.025、174.8° -> 0.000。
+    // ⚠ 这里的角度是**相对起栈基准**的偏移量，不是绝对舵机角（2026-11-07 改）。
+    //   换爪/断电后多圈零点会变，同一个绝对角两次起栈可以一次合拢一次张到顶，
+    //   所以 robo_driver 起栈时读一次实际角记为 base，写入时 target = base + deg。
+    //   → 本节点只发相对量，绝对角的事归 driver 管。
     //
     // ⚠ 别让 joint7 超出 URDF 的 [-0.025, 0]：一旦超限，MoveIt 的 planning scene
     //   会把整个机器人状态判为 invalid，OMPL 报 "Skipping invalid start state"，
     //   之后所有规划全部失败 —— 表现为"发任何目标都不动"，且与目标点无关。
-    //   （历史事故：else 分支曾发 0.0°，算出 -0.032 m，超下限 28%）
     //
-    // 注意命令名与物理动作相反（历史遗留，调用方用 GRIP_CMD 表映射）：
-    //   "open"  -> kServoClosed(174.8°) -> 物理张开 65 mm
-    //   "close" -> kServoOpened( 86.7°) -> 物理闭合 4 mm
-    // 2026-11-03 夹爪拆装后零位偏移，卸力手推实测两端：
-    //   舵机  86.7° → 两指完全闭合（joint7_left = -0.025，两指 4 mm）
-    //   舵机 174.8° → 两指完全张开（joint7_left =  0.000，两指 65 mm）
-    // 拆装前是 21.9°~100.0°，那组值现在会把舵机顶死。
-    // 174.8° 已接近舵机 180° 机械限位，不要再加大。
-    //
-    // 注意命名：这两个常量名是反的（历史遗留），kServoClosed 实际是"张开"。
-    //   在 `if (command == "open")` 里用的是 kServoClosed —— 名字别信，看分支。
-    constexpr double kServoClosed = 174.8;   // 物理：张开 65 mm（舵机角大）
-    constexpr double kServoOpened = 86.7;    // 物理：完全闭合 4 mm
+    // 语义（2026-11-07 队友标定，夹爪修复后）：
+    //   0°    = 基准位（起栈时两指拨到合拢）→ joint7_left -0.025，两指 1.6 mm
+    //   -100° = 再张 100°（机械极限）        → joint7_left  0.000，两指 50.9 mm
+    // 命令名与物理动作相反是历史遗留，调用方用 GRIP_CMD 表映射，别改名。
+    constexpr double kGripOpenDeg = -100.0;   // 物理：张开（相对基准 -100°）
+    constexpr double kGripCloseDeg = 0.0;     // 物理：合拢（基准位）
 
-    if (command == "open") {
-      msg.target_angle = {kServoClosed};
-    } else {
-      msg.target_angle = {kServoOpened};
-    }
+    msg.target_angle = {(command == "open") ? kGripOpenDeg : kGripCloseDeg};
     set_angle_pub_->publish(msg);
   }
 

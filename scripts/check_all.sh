@@ -23,6 +23,7 @@ echo "== 3/6 任务层单元测试 =="
 
 echo "== 4/6 夹爪口径 =="
 python3 scripts/checks/grip_check.py
+python3 scripts/checks/grip_math_check.py
 
 echo "== 5/6 视觉 / 轨迹回归 =="
 python3 scripts/checks/pick_check.py

@@ -52,17 +52,24 @@ class TestGripperSemantics(unittest.TestCase):
             m.assert_called_once_with("open_fingers", action="release")
 
     def test_measured_mapping(self):
-        # 2026-11-03 卸力手推实测：CLI "open" -> 舵机 174.8° -> 两指张开
-        #                       CLI "close"-> 舵机 86.7° -> 两指合拢（4 mm）
+        # 2026-11-07 队友标定（夹爪修复后）：角度是**相对起栈基准**的偏移，
+        #   CLI "open" -> 0/-100° 区间靠 -100 一侧 -> 两指张开
+        #   CLI "close"-> 基准位 0° -> 两指合拢（1.6 mm）
         # （10-17 从仿真推出来的"名字相反"是错的，仿真的夹爪桥做过 clamp，方向没验过）
         self.assertEqual(config.GRIP_CMD["close_fingers"], "close")
         self.assertEqual(config.GRIP_CMD["open_fingers"], "open")
 
     def test_gap_conversion(self):
-        # 2026-11-03 卸力手推实测：0.000 -> 65 mm，-0.025 -> 4 mm（合到底仍有 4 mm 间隙）
-        self.assertAlmostEqual(primitives.gripper_gap_mm(0.0), 65.0)
-        self.assertAlmostEqual(primitives.gripper_gap_mm(-0.025), 4.0)
-        self.assertAlmostEqual(primitives.gripper_gap_mm(-0.015), 28.4, places=1)
+        # 端点直接取 config，不在测试里抄数字；中点必须**低于线性平均**，
+        # 这条是防"有人把二次曲线改回线性"的哨兵（线性会让中间开度虚高 6 mm）。
+        self.assertAlmostEqual(primitives.gripper_gap_mm(config.P.JMAX),
+                               config.GAP_MAX_MM, places=3)
+        self.assertAlmostEqual(primitives.gripper_gap_mm(config.P.JMIN),
+                               config.GAP_MIN_MM, places=3)
+        mid = primitives.gripper_gap_mm((config.P.JMIN + config.P.JMAX) / 2.0)
+        linear = (config.GAP_MIN_MM + config.GAP_MAX_MM) / 2.0
+        self.assertLess(mid, linear - 5.0,
+                        "曲线失效：半开 %.1f mm，线性应为 %.1f mm" % (mid, linear))
         self.assertIsNone(primitives.gripper_gap_mm(None))
 
 

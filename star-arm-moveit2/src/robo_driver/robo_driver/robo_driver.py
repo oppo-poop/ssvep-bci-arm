@@ -56,15 +56,25 @@ class uservo_ex:
     # 2026-10-18 实测：把臂摆成 Γ 形（FK 末端距 URDF 零位 4.8 mm）时的读数。
     ZERO_OFFSET_DEG = [0.4, -0.2, -0.1, 1.3, -0.3, 0.8]
 
-    #: 夹爪（joint7）的实测端点，2026-11-03 拆装后**卸力手推**量的（不是推算）：
-    #:   舵机  86.7° → 两指完全闭合（4 mm）   → joint7_left = -0.025
-    #:   舵机 174.8° → 两指完全张开（65 mm）  → joint7_left =  0.000
-    #: 行程 88.1°。拆装前是 21.9°~100.0°，零位偏了约 65°。
-    #: ⚠ 只对"当前这次装配"有效，再拆装一次要重量（两端都要量）。
-    GRIP_DEG_CLOSE = 86.7
-    GRIP_DEG_OPEN = 174.8
-    #: 上电启动位（度）。取约半开，旧值 50° 低于闭合角会顶死。
-    GRIP_START_DEG = 121.0
+    #: 夹爪（joint7）口径，2026-11-07 队友标定（夹爪修复后换了几何）。
+    #: **角度是相对起栈基准的偏移量，不是绝对舵机角**：换爪/断电后多圈零点就变，
+    #: 同一个绝对角两次起栈可以一次合拢、一次张到顶（实测 60° 两副样）。
+    #: 起栈时读一次实际角记为 base，之后 target = base + deg。
+    #:   0°    = 基准位（约定起栈前两指拨到合拢）  1.6 mm  joint7_left -0.025
+    #:   -100° = 再张 100°（机械极限）             50.9 mm  joint7_left  0.000
+    #: 角度→间距是二次曲线，前 40° 基本空程；线性会把中间开度算错 4 mm 以上。
+    GRIP_DEG_CLOSE = 0.0
+    GRIP_DEG_OPEN = -100.0
+    GRIP_FULL_MM = 50.9
+    GRIP_CURVE_K = 0.412
+    GRIP_GAP_MIN_MM = 1.6
+    GRIP_JOINT_MIN = -0.025
+    GRIP_JOINT_MAX = 0.0
+    #: 舵机限功率。旧值 8000 mW 在夹紧时顶不动硬物，队友标定时用 12000。
+    GRIP_POWER_MW = 12000
+    #: 起栈夹爪角。None = **原地不动**（读回当前角原样发回）。绝不要写死一个
+    #: 绝对角：多圈零点每次上电都可能不同，写死会"绕一圈再顶到机械极限"。
+    GRIP_START_DEG = None
 
 
     # 参数 / Parameters:
@@ -88,12 +98,38 @@ class uservo_ex:
         # 启动时驱到的位置 = URDF 零位对应的舵机角度，而不是舵机 0°。
         # 单位是 0.1°（target_angle 的格式）；offset 全 0 时与旧行为完全一致。
         self.ZERO_ANGLE = [int(10 * o) for o in self.ZERO_OFFSET_DEG]
-        # 夹爪启动位，单位 0.1°。**不参与零位标定**，只是给一个"半开"的落点。
-        # 2026-11-03 拆装后新范围是 86.7°（闭合）~174.8°（张开），
-        # **50° 已经低于闭合角，启动时会硬顶 36.7° → 堵转发热。**
-        # 取 121° ≈ 27.8 mm，和旧爪的"半开 28 mm"物理上一致。
-        self.ZERO_ANGLE.append(int(10 * self.GRIP_START_DEG))
-        self.reset_multi_turn_angle(0xff)
+
+        # ---------------- 夹爪：只重置 6 号多圈，然后**原地不动** ----------------
+        # 为什么不是 reset_multi_turn_angle(0xff)
+        #   0xff 是广播 ID，这类舵机只认单独 ID，广播会被静默忽略 —— 多圈零点
+        #   根本没归零，"基准 + 100°" 就可能算到 260° 这种超出舵机范围的值，
+        #   命令被吞（表现为"发了 open 夹爪没反应"）。臂的 6 个关节更不能 reset：
+        #   那会把绝对位置全抹掉，整臂位置就无从得知了。
+        # 为什么"读什么发什么"
+        #   多圈零点既然不可靠，就**不假设**它是多少：读一次当前角记为 base，
+        #   把当前角原样发回去 = 命令"留在原地"。写死某个绝对角的话，差值大时
+        #   会绕整整一圈、途中顶到机械极限再弹回来（用户看见"舵机转了一圈"）。
+        self.grip_base_deg = 0.0
+        self.grip_ok = False
+        try:
+            self.reset_multi_turn_angle(6)
+            time.sleep(0.15)
+            _cur = self.query_servo_current_angle(6)
+            if _cur is None:
+                raise ValueError("读回 None")
+            self.grip_base_deg = float(_cur)
+            self.grip_ok = True
+        except Exception as _e:                       # noqa: BLE001
+            msg = ("[gripper] ⚠ 舵机6 基准读取失败（%s）—— 夹爪命令将被拒绝，"
+                   "臂不受影响" % _e)
+            if self.log is not None:
+                self.log.error(msg)
+            print(msg, flush=True)
+        self.ZERO_ANGLE.append(int(round(10 * self.grip_base_deg)))
+        print("[gripper] close=%.1f° open=%.1f° full=%.1fmm k=%+.3f 基准=%.1f°%s"
+              % (self.GRIP_DEG_CLOSE, self.GRIP_DEG_OPEN, self.GRIP_FULL_MM,
+                 self.GRIP_CURVE_K, self.grip_base_deg,
+                 "" if self.grip_ok else "  ← 基准不可用"), flush=True)
         time.sleep(0.1)
 
     # 将角度转为弧度 / Convert degrees to radians
@@ -102,19 +138,69 @@ class uservo_ex:
         radians = degrees * (math.pi / 180)
         return radians
 
+    # ---------------- 夹爪换算（相对基准角）----------------
+    @classmethod
+    def _grip_shape(cls, x):
+        """归一化开度 0..1 → 间距形状 0..1。二次曲线，前段空程。"""
+        x = max(0.0, min(1.0, float(x)))
+        k = cls.GRIP_CURVE_K
+        return x * x + k * x * (1.0 - x)
+
+    @classmethod
+    def _grip_shape_inv(cls, y):
+        """间距形状 0..1 → 归一化开度。解 (1−k)x² + kx − y = 0。"""
+        y = max(0.0, min(1.0, float(y)))
+        k = cls.GRIP_CURVE_K
+        a = 1.0 - k
+        if abs(a) < 1e-9:
+            return y
+        x = (-k + math.sqrt(max(0.0, k * k + 4.0 * a * y))) / (2.0 * a)
+        return max(0.0, min(1.0, x))
+
+    @classmethod
+    def grip_x(cls, deg_rel):
+        span = cls.GRIP_DEG_OPEN - cls.GRIP_DEG_CLOSE
+        if abs(span) < 1e-9:
+            return 0.0
+        return max(0.0, min(1.0, (float(deg_rel) - cls.GRIP_DEG_CLOSE) / span))
+
+    @classmethod
+    def grip_gap_mm(cls, deg_rel):
+        """夹爪舵机角（相对基准）→ 两指间距（毫米）。"""
+        span_mm = cls.GRIP_FULL_MM - cls.GRIP_GAP_MIN_MM
+        return cls.GRIP_GAP_MIN_MM + span_mm * cls._grip_shape(cls.grip_x(deg_rel))
+
+    @classmethod
+    def grip_deg_to_joint(cls, deg_rel):
+        """夹爪舵机角（相对基准）→ joint7_left（米）。
+
+        必须 clamp 在 URDF 限位里：一旦超限，MoveIt 会把整机状态判成 invalid，
+        OMPL 报 "Skipping invalid start state"，之后**任何目标都不动**。
+        """
+        travel = cls.GRIP_JOINT_MAX - cls.GRIP_JOINT_MIN
+        v = cls.GRIP_JOINT_MIN + travel * cls._grip_shape(cls.grip_x(deg_rel))
+        return max(cls.GRIP_JOINT_MIN, min(cls.GRIP_JOINT_MAX, v))
+
+    @classmethod
+    def grip_joint_to_deg(cls, joint):
+        """joint7_left（米）→ 夹爪舵机角（相对基准）。"""
+        travel = cls.GRIP_JOINT_MAX - cls.GRIP_JOINT_MIN
+        y = 0.0 if abs(travel) < 1e-9 else \
+            (float(joint) - cls.GRIP_JOINT_MIN) / travel
+        return cls.GRIP_DEG_CLOSE + cls._grip_shape_inv(y) * (
+            cls.GRIP_DEG_OPEN - cls.GRIP_DEG_CLOSE)
+
     # 将角度转为米 / Convert degrees back to meters
     @classmethod
-    def servoangle2jointstate(cls, servo_id, servo_angle):
+    def servoangle2jointstate(cls, servo_id, servo_angle, grip_base=0.0):
         if servo_id in range(6):
             # 先扣掉零位偏移，再换成弧度
             return cls.degrees_to_radians(servo_angle - cls.ZERO_OFFSET_DEG[servo_id])
         elif servo_id == 6:
-            # 2026-11-03 拆装后零位偏移，旧的 (deg-100)/100*0.032 作废：
-            # 它把 100° 当全开，而实测全开在 174.8°，于是 100° 之后
-            # joint 会转正、超 URDF upper=0，臂就卡在"只开 10 mm"。
-            # 现在按实测两端线性映射，joint 始终落在 [-0.025, 0]。
-            span = cls.GRIP_DEG_OPEN - cls.GRIP_DEG_CLOSE      # 88.1°
-            return (servo_angle - cls.GRIP_DEG_OPEN) * (0.025 / span)
+            # 夹爪**必须先减基准**，否则读数和物理对不上：基准 160°、爪子就停在
+            # 160°（物理上合拢），按绝对角算会落到 [-100, 0] 之外 → clamp 成全开，
+            # 于是界面显示"50.9 mm"，人眼看着明明是闭合的。
+            return cls.grip_deg_to_joint(servo_angle - grip_base)
 
     # 设置角度（指定转速） / Send angle commands with specified speed
     def set_angle_by_interval(self, size, command_data_list):
@@ -204,15 +290,24 @@ class Arm_contorl(Node):
             # 写方向补零位偏移：URDF 角度 → 舵机角度（夹爪不参与零位）
             offset = self.Servo.ZERO_OFFSET_DEG[id] if id < 6 else 0.0
             if id == 6:
-                # 最后一道保护：旧节点 / bag 回放可能发越界角，直接夹紧并告警。
-                clamped = min(max(angle, self.Servo.GRIP_DEG_CLOSE),
-                              self.Servo.GRIP_DEG_OPEN)
-                if abs(clamped - angle) > 1e-6:
+                # 夹爪：消息里的角度是**相对基准**的偏移，先夹到安全区间再换成
+                # 绝对舵机角。旧节点 / bag 回放可能发越界值，直接夹住并告警。
+                lo = min(self.Servo.GRIP_DEG_CLOSE, self.Servo.GRIP_DEG_OPEN)
+                hi = max(self.Servo.GRIP_DEG_CLOSE, self.Servo.GRIP_DEG_OPEN)
+                rel = min(max(angle, lo), hi)
+                if abs(rel - angle) > 1e-6:
                     self.get_logger().warn(
                         "夹爪目标 %.1f° 越界，已夹到 [%.1f, %.1f]°"
-                        % (angle, self.Servo.GRIP_DEG_CLOSE,
-                           self.Servo.GRIP_DEG_OPEN))
-                angle = clamped
+                        % (angle, lo, hi))
+                if self.Servo.grip_ok:
+                    angle = self.Servo.grip_base_deg + rel
+                else:
+                    # 基准没读到就别动夹爪：相对角没有参照系，发出去可能是
+                    # "从当前位置再张 100°" 的整圈运动。
+                    self.get_logger().error(
+                        "夹爪基准不可用，拒绝执行（臂不受影响）；"
+                        "先跑 scripts/servo_check.py 查舵机 6")
+                    angle = self.Servo.grip_base_deg
             self.target_angle[id] = int(10 * (angle + offset))
             if int(msg.time[i]) < 40:
                 (msg.time[i]) = 40
@@ -237,7 +332,8 @@ class Arm_contorl(Node):
             JointState_msg.name.append(self.Servo.JOINT_[i])
             JointState_msg.position.append(
                 self.Servo.servoangle2jointstate(
-                    servo_id=i, servo_angle=self.current_angle[i]
+                    servo_id=i, servo_angle=self.current_angle[i],
+                    grip_base=self.Servo.grip_base_deg,
                 )
             )
         self.joint_states_publisher.publish(JointState_msg)
@@ -288,7 +384,8 @@ class Arm_contorl(Node):
         acc = [0.0 for _ in range(self.Servo.SRV_NUM)]
         for i in range(self.Servo.SRV_NUM):
             acc[i] = int(self.interval[i]/2)
-        command_data_list = [struct.pack("<BlLHHH", i, self.target_angle[i], self.interval[i], acc[i], acc[i], 8000) for i in range(self.Servo.SRV_NUM)]
+        power_mw = int(os.environ.get("CELLO_POWER_MW", str(self.Servo.GRIP_POWER_MW)))
+        command_data_list = [struct.pack("<BlLHHH", i, self.target_angle[i], self.interval[i], acc[i], acc[i], power_mw) for i in range(self.Servo.SRV_NUM)]
         self.Servo.set_angle_by_interval(self.Servo.SRV_NUM, command_data_list)
 
 

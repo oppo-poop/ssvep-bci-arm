@@ -54,15 +54,15 @@ DEFAULT_QUAT = params.DEFAULT_QUAT
 # 示教（teach.py --force）时应该越过，自动执行时保持保守。
 BOUNDS = params.BOUNDS
 
-# 夹爪：arm_moveit_write 发的是舵机角度；joint7_left 的换算在 robo_driver 里。
-# **2026-11-03 夹爪拆装后零位偏移，按卸力手推实测两端重标**：
-#   舵机  86.7° -> joint7_left = -0.025 m   两指闭合 4 mm    ← CLI "close"
-#   舵机 174.8° -> joint7_left =  0.000 m   两指张开 65 mm   ← CLI "open"
+# 夹爪：arm_moveit_write / robo_driver 都按**相对起栈基准**的角度算，不是绝对舵机角。
+# **2026-11-07 队友标定（夹爪修复后换了几何）**：
+#   0°    -> joint7_left = -0.025 m   两指合拢 1.6 mm   ← CLI "close"
+#   -100° -> joint7_left =  0.000 m   两指张开 50.9 mm  ← CLI "open"（机械极限）
+# 角度→间距是二次曲线（前 40° 基本空程），换算统一走 roarm_lib.params。
 GRIP_EXPECT = params.GRIP_EXPECT_CLI
 
-#: 夹爪舵机可用角度区间（实测）。低于 86.7° 顶死，高于 174.8° 撑坏爪。
-#: 只对当前这次装配有效；再拆装一次要重量。
-GRIP_DEG_MIN, GRIP_DEG_MAX = params.CLOSE, params.OPEN
+#: 夹爪舵机角度可用区间（相对基准，含方向）。超出区间顶死或撑坏爪。
+GRIP_DEG_MIN, GRIP_DEG_MAX = params.GRIP_DEG_MIN, params.GRIP_DEG_MAX
 
 JOINT_NAMES = [f"joint{i}" for i in range(1, 7)]
 BASE_FRAME = "world"
@@ -326,9 +326,14 @@ def handle(node, argv, force, timeout, tol_mm):
             print("用法：grip open|close   （要半开用 grip_deg <角度>）")
             return EXIT_REJECT
         cmd = argv[1]
-        node.send_grip(cmd)
-        target = GRIP_EXPECT[cmd]
-        print("→ 夹爪 %s（目标 joint7_left = %.3f m）" % (cmd, target))
+        # 目标开度来自 config（open_target_mm / close_target_mm），不是写死端点：
+        # 端点就是机械极限，天天顶在上面舵机会发烫。
+        mm = params.OPEN_TARGET_MM if cmd == "open" else params.CLOSE_TARGET_MM
+        deg = params.deg_of_gap(mm)
+        node.send_grip_deg(deg)
+        target = params.servo_to_joint(deg)
+        print("→ 夹爪 %s（%.1f°，相对基准；目标 joint7_left = %.4f m，两指约 %.1f mm）"
+              % (cmd, deg, target, mm))
 
     elif op in ("grip_deg", "gripdeg"):
         if len(argv) < 2:
@@ -343,8 +348,9 @@ def handle(node, argv, force, timeout, tol_mm):
         if not (GRIP_DEG_MIN <= deg <= GRIP_DEG_MAX):
             print("拒绝：%.1f° 超出可用范围 [%.1f, %.1f]"
                   % (deg, GRIP_DEG_MIN, GRIP_DEG_MAX))
-            print("  joint7_left = (deg - 174.8) * 0.025 / 88.1，"
-                  "超限会让 MoveIt 把整机状态判为非法，之后所有规划都会失败")
+            print("  这里是**相对起栈基准**的偏移角：0 = 合拢位、%.0f = 全开（机械极限）。"
+                  % GRIP_DEG_MIN)
+            print("  超限会让 MoveIt 把整机状态判为非法，之后所有规划都会失败")
             return EXIT_REJECT
         node.send_grip_deg(deg)
         target = params.servo_to_joint(deg)

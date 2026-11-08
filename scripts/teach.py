@@ -45,8 +45,8 @@ SCENE_OUT = ROOT / "data" / "scene_real.yaml"
 #: 实测移动速度（velocity_scaling=0.05）：30 mm 用 9.9 s ≈ 3 mm/s
 SPEED_MM_S = 3.0
 #: 夹爪端点/开度全部来自 config/robot.json。
-#: 2026-11-03 拆装后重标：闭合 86.7° / 4 mm，全开 174.8° / 65 mm。
-#: 旧值 21.9°/100°、8~57 mm 会把舵机顶死。
+#: 2026-11-07 队友标定（夹爪修复后）：基准 0° / 1.6 mm，全开 -100° / 50.9 mm。
+#: 角度是相对起栈基准的偏移，换算走 params（二次曲线），别写线性公式。
 GRIP_CLOSED_DEG, GRIP_OPEN_DEG = params.CLOSE, params.OPEN
 GAP_MIN_MM, GAP_MAX_MM = params.GMIN, params.GMAX
 MAX_STEP_MM = 50.0
@@ -222,8 +222,7 @@ def emit(pts, standoff_override=None, out=None):
         print("  未记录 grip 张开比例，用全开 1.00")
 
     # 合拢比例：按物宽算，留 2 mm 过盈（略小于物宽才夹得住，又不至于堵转）
-    span = GAP_MAX_MM - GAP_MIN_MM
-    grip_close = max(0.0, min(1.0, (w * 1000 - 2 - GAP_MIN_MM) / span))
+    grip_close = max(0.0, min(1.0, params.gap_to_frac(w * 1000 - 2)))
     print("  张开 %.0f mm(grip %.2f)  合拢 %.0f mm(grip %.2f)  [物宽 %.0f mm]"
           % (params.frac_to_gap_mm(grip_open), grip_open,
              params.frac_to_gap_mm(grip_close), grip_close, w * 1000))
@@ -235,7 +234,7 @@ def emit(pts, standoff_override=None, out=None):
         "place: [%.4f, %.4f, %.4f]" % (place["x"], place["y"], place["z"]),
         "object_height: %.3f" % h,
         "object_width: %.3f" % w,
-        "grip_open: %.2f                 # 张开比例：0=4mm 1=65mm" % grip_open,
+        "grip_open: %.2f                 # 张开比例：0=合拢 1=全开" % grip_open,
         "grip_close: %.2f                # 合拢比例：略小于物宽即可" % grip_close,
         "standoff: %.3f" % standoff,
         "clearance: 0.02",

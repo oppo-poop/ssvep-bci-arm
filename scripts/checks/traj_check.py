@@ -212,13 +212,17 @@ def main():
           "取消：先发轨迹命令、再发保持当前角度")
 
     # --- 夹爪换算与保持当前角度 ---
-    print("[夹爪] joint7 端点 / 取消保持")
-    check(abs(mod.jointstate2servoangle(6, -0.025) - 86.7) < 1e-6,
-          "joint7 -0.025 m → 86.7°（闭合）")
-    check(abs(mod.jointstate2servoangle(6, 0.0) - 174.8) < 1e-6,
-          "joint7 0.000 m → 174.8°（张开）")
+    # 2026-11-07 起角度是**相对起栈基准**的偏移：合拢 0°、全开 -100°，
+    # 中间走二次曲线（前 40° 基本空程），所以中点不是端点的算术平均。
+    print("[夹爪] joint7 端点 / 曲线 / 取消保持")
+    check(abs(mod.jointstate2servoangle(6, -0.025) - 0.0) < 1e-6,
+          "joint7 -0.025 m → 0°（合拢）")
+    check(abs(mod.jointstate2servoangle(6, 0.0) - (-100.0)) < 1e-6,
+          "joint7 0.000 m → -100°（全开）")
     mid = mod.jointstate2servoangle(6, -0.015)
-    check(86.7 < mid < 174.8, "joint7 中间值落在端点之间（%.1f°）" % mid)
+    check(-100.0 < mid < 0.0, "joint7 中间值落在端点之间（%.1f°）" % mid)
+    check(mid < -50.0,
+          "曲线生效：半开时角度比线性更远离合拢（%.1f° < -50°）" % mid)
 
     clock5 = _Clock()
     node5 = _node(mod, clock5)

@@ -106,7 +106,11 @@ GRIP_CMD = {
     "open_fingers": "open",
 }
 
-GRIP_DEG_MIN, GRIP_DEG_MAX = P.CLOSE, P.OPEN
+#: 夹爪口径（2026-11-07 队友标定，角度是**相对起栈基准**的偏移）
+#:   0°     -> joint7_left -0.025 -> 两指合拢 1.6 mm
+#:   -100°  -> joint7_left  0.000 -> 两指张开 50.9 mm（机械极限）
+#: 角度→间距是二次曲线，换算走 config.P（roarm_lib.params），别写线性公式。
+GRIP_DEG_MIN, GRIP_DEG_MAX = P.GRIP_DEG_MIN, P.GRIP_DEG_MAX
 GAP_MIN_MM, GAP_MAX_MM = P.GMIN, P.GMAX
 GAP_ZERO_POS = P.JMIN
 

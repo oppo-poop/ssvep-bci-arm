@@ -4,6 +4,8 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "robo_interfaces/msg/set_angle.hpp"
 #include <string>
+#include <algorithm>
+#include <cmath>
 #include <unordered_map>
 #include <filesystem> // 添加文件系统操作支持
 #include <iostream>
@@ -22,11 +24,15 @@ std::vector<std::string> joint_name = {
     "joint6",
     "joint7_left"};
 
-// 夹爪端点：与 config/robot.json 一致，由 scripts/grip_check.py 强制检查。
-// 2026-11-03 拆装后实测：86.7° = 闭合 4 mm（joint -0.025），
-// 174.8° = 张开 65 mm（joint 0.000）。
-constexpr double kServoClose = 86.7;
-constexpr double kServoOpen = 174.8;
+// 夹爪口径：与 config/robot.json 一致，由 scripts/checks/grip_check.py 强制检查。
+// 2026-11-07 队友标定（夹爪修复后）：角度是**相对起栈基准**的偏移，不是绝对舵机角。
+//   0°    = 基准位（合拢，joint -0.025，两指 1.6 mm）
+//   -100° = 再张 100°（全开，joint 0.000，两指 50.9 mm）
+// 角度→间距是二次曲线（前 40° 基本空程）。录制的是相对量，回放时 robo_driver
+// 自己加基准，所以这里不需要、也不能知道基准是多少。
+constexpr double kGripCloseDeg = 0.0;
+constexpr double kGripOpenDeg = -100.0;
+constexpr double kGripCurveK = 0.412;
 constexpr double kJointMin = -0.025;
 constexpr double kJointMax = 0.0;
 
@@ -36,9 +42,18 @@ float jointstate2servoangle(uint8_t servo_id, float joint_state)
   // robo_driver 会在写方向补零位偏移，所以这里**不能**再加偏移。
   if (servo_id < 6)
     return joint_state * (180 / 3.1415926);
-  else if (servo_id == 6)
-    return kServoClose + (joint_state - kJointMin)
-           * (kServoOpen - kServoClose) / (kJointMax - kJointMin);
+  else if (servo_id == 6) {
+    // joint7_left → 归一化开度，再解 (1−k)x² + kx − y = 0
+    double y = (joint_state - kJointMin) / (kJointMax - kJointMin);
+    y = std::max(0.0, std::min(1.0, y));
+    const double a = 1.0 - kGripCurveK;
+    double x = (std::fabs(a) < 1e-9)
+                 ? y
+                 : (-kGripCurveK + std::sqrt(std::max(
+                      0.0, kGripCurveK * kGripCurveK + 4.0 * a * y))) / (2.0 * a);
+    x = std::max(0.0, std::min(1.0, x));
+    return static_cast<float>(kGripCloseDeg + x * (kGripOpenDeg - kGripCloseDeg));
+  }
   else
     return 0;
 }

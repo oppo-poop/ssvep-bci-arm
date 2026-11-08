@@ -86,10 +86,24 @@ rc, _ = quiet(real_cli_pose, TGT, 90.0, 15.0, True, False)
 check("--force" in captured[-1],
       "投放点 (571,181,72)：z 超界 + x/y 超 CLI 区 → 自动加 --force")
 
+# 2026-11-08：config/robot.json 的 bounds 与 vision.json 的 reach 已统一，
+# 真实配置构造不出"超 CLI 区但仍在可达包络内"的点 —— 这正是要的结果。
+# 所以这里收窄 CLI_BOUNDS 来验证"自动补 --force"这个机制本身还在。
+_OLD_CLI = dict(mod.CLI_BOUNDS)
+mod.CLI_BOUNDS = {"x": (0.278, 0.45), "y": (-0.30, 0.11), "z": (0.074, 0.438)}
 captured.clear()
 rc2, _ = quiet(real_cli_pose, [571.0, 181.0, 97.0], 90.0, 15.0, True, False)
 check("--force" in captured[-1],
-      "松爪抬升 (571,181,97)：z 正常但 x/y 超 CLI 区 → 也自动加 --force")
+      "CLI 区收窄时 (571,181,97) 自动补 --force（机制仍在）")
+mod.CLI_BOUNDS = _OLD_CLI
+
+captured.clear()
+rc2b, _ = quiet(real_cli_pose, [571.0, 181.0, 97.0], 90.0, 15.0, True, False)
+check("--force" not in captured[-1],
+      "边界统一后 (571,181,97) 落在区内，不再需要 --force")
+check(mod.CLI_BOUNDS["x"] == mod.BOUNDS["x"]
+      and mod.CLI_BOUNDS["y"] == mod.BOUNDS["y"],
+      "两套边界已统一（CLI 区 == 可达包络）")
 
 captured.clear()
 rc3, _ = quiet(real_cli_pose, [400.0, -100.0, 150.0], 90.0, 15.0, True, False)
