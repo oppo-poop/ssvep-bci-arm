@@ -76,6 +76,14 @@ START_DEG = None if START_DEG is None else float(START_DEG)
 OPEN_TARGET_MM = float(GRIP.get("open_target_mm", GMAX))
 CLOSE_TARGET_MM = float(GRIP.get("close_target_mm", GMIN))
 
+#: 夹爪走完整个行程的时长（毫秒）。夹爪打印件脆，这个值别调小 ——
+#: 1000 ms 走 100° 会把打印件和舵机一起打；驱动层还会再 +400 ms 缓冲。
+MOVE_MS = int(GRIP.get("move_ms", 3000))
+#: 发一条夹爪命令后，等它真的停下来需要多久（秒）。给 CLI 的 --wait 用。
+MOVE_S = MOVE_MS / 1000.0 + 0.4
+#: 建议的命令等待时间（秒）：运动时长 + 2 s 判据余量，向上取到整秒。
+GRIP_WAIT_S = float(math.ceil(MOVE_S + 1.6))
+
 #: 兼容旧代码的别名
 GRIP_DEG_MIN, GRIP_DEG_MAX = min(CLOSE, OPEN), max(CLOSE, OPEN)
 GAP_MIN_MM, GAP_MAX_MM = GMIN, GMAX
@@ -162,6 +170,9 @@ def _validate():
     if len(ZERO_OFFSET_DEG) != 6:
         raise ValueError("zero_offset_deg 必须是 6 个臂关节，当前 %d 个"
                          % len(ZERO_OFFSET_DEG))
+    if MOVE_MS < 1500:
+        raise ValueError("夹爪 move_ms=%.0f 太快：夹爪打印件会崩，别低于 1500"
+                         % MOVE_MS)
 
 
 _validate()
@@ -275,9 +286,10 @@ def _selftest():
     assert GRIP_EXPECT["close_fingers"] == JMIN
     assert GRIP_EXPECT["open_fingers"] == JMAX
     print("params selftest ok: close=%.1f° open=%.1f° gap=%.1f~%.1fmm "
-          "open_target=%.1fmm(%.1f°) 中位=%.1fmm"
+          "open_target=%.1fmm(%.1f°) 中位=%.1fmm move=%dms(等%.0fs)"
           % (CLOSE, OPEN, GMIN, GMAX, OPEN_TARGET_MM,
-             deg_of_gap(OPEN_TARGET_MM), frac_to_gap_mm(0.5)))
+             deg_of_gap(OPEN_TARGET_MM), frac_to_gap_mm(0.5),
+             MOVE_MS, GRIP_WAIT_S))
 
 
 if __name__ == "__main__":

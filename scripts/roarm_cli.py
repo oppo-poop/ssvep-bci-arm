@@ -130,11 +130,14 @@ class RoArmCli(Node):
 
         robo_driver 订阅 set_angle_topic 后直接驱动舵机，joint_states 会跟着更新，
         所以 MoveIt 仍能看到合法状态。示教时用它做连续开度。
+
+        时长用 config 的 `move_ms`（默认 3000）：夹爪打印件脆，1000 ms 走完
+        100° 会把它打崩；驱动层还会再加 400 ms 缓冲。
         """
         msg = SetAngle()
         msg.servo_id = [6]
         msg.target_angle = [float(deg)]
-        msg.time = [1000]
+        msg.time = [params.MOVE_MS]
         self.set_angle_pub.publish(msg)
 
     def send_arm_deg(self, degs, time_ms=3000):

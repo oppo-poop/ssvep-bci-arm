@@ -221,6 +221,17 @@ def check_vendor_constants(checks, src):
         and same(grab_num(ctrl, r"GRIP_JOINT_MAX\s*=\s*(-?[\d.]+)"), p.JMAX),
         "close=%s open=%s" % (ctrl_close, ctrl_open))
 
+    # 运动时长：三处发夹爪命令的地方必须和 config 的 move_ms 一致。
+    # 夹爪是打印件，1000 ms 走 100° 会打坏（2026-11-08）；这里防的是
+    # 有人只改了 config、忘了改 C++/controller，结果还是快合一记。
+    ctrl_ms = grab_num(ctrl, r"GRIP_MOVE_MS\s*=\s*(\d+)")
+    cpp_ms = grab_num(cpp, r"kGripMoveMs\s*=\s*(\d+)")
+    add(checks, "夹爪运动时长",
+        same(ctrl_ms, float(p.MOVE_MS)) and same(cpp_ms, float(p.MOVE_MS))
+        and p.MOVE_MS >= 1500,
+        "controller=%s cpp=%s config=%d ms（≥1500）"
+        % (ctrl_ms, cpp_ms, p.MOVE_MS))
+
     bag = src["bag"]
     bag_close = grab_num(bag, r"kGripCloseDeg\s*=\s*(-?[\d.]+)")
     bag_open = grab_num(bag, r"kGripOpenDeg\s*=\s*(-?[\d.]+)")
@@ -255,6 +266,7 @@ def check_source_structure(checks, src):
     required = [
         ("roarm_cli 使用 params", "cli", r"servo_to_joint\s*\("),
         ("roarm_cli 开度使用 params", "cli", r"gap_mm_from_servo\s*\("),
+        ("roarm_cli 时长用 params", "cli", r"msg\.time = \[params\.MOVE_MS\]"),
         ("sim_bridge 使用 params", "sim", r"servo_to_joint\s*\("),
         ("teach 使用 params 比例", "teach", r"frac_to_servo\s*\("),
         ("servo_check 使用 params", "servo", r"\bparams\."),
@@ -305,6 +317,8 @@ def main():
         "gap_min_mm": params.GMIN,
         "gap_max_mm": params.GMAX,
         "open_target_mm": params.OPEN_TARGET_MM,
+        "move_ms": params.MOVE_MS,
+        "grip_wait_s": params.GRIP_WAIT_S,
         "checks": checks,
         "problems": ["%s：%s" % (c["name"], c["detail"]) for c in bad],
         "ok": not bad,

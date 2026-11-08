@@ -695,7 +695,13 @@ def cli_pose_zfix(target, wait, tol, force, allow_far=False, iters=1,
     return 0, act
 
 
-def cli_grip(cmd, wait, tol=5.0):
+#: 夹爪一次开/合的等待秒数。一次行程 3.4 s（move_ms 3000 + 驱动 400 ms 缓冲），
+#: 再留判据余量；不够会误判"没到位"，多了每次空夹都白等。改 move_ms 会跟着变。
+GRIP_WAIT = params.GRIP_WAIT_S
+
+
+def cli_grip(cmd, wait=None, tol=5.0):
+    wait = GRIP_WAIT if wait is None else wait
     rc, out = run_cli(["grip", cmd, "--wait", "%.1f" % wait, "--tol", "%.1f" % tol],
                       timeout=wait + 15)
     show(out)
@@ -1304,7 +1310,7 @@ def main():
             lv.set_status("[7/7] closing grip + home" if close_grip
                           else "[7/7] going home")
         if close_grip:
-            cli_grip("close", 4)
+            cli_grip("close")
             print("  夹爪已闭合")
         rc2, out2 = run_cli(["home", "--wait", "%.1f" % args.wait, "--tol", "40.0"],
                             timeout=args.wait + 25)
@@ -1576,7 +1582,7 @@ def main():
         # 报错、整条 home 命令根本不执行（2026-11-03 日志开头那句
         # "unrecognized arguments: --close-grip"，还被当成"臂有固定偏差"糊弄过去）。
         _t_home = time.perf_counter()
-        cli_grip("close", 4)
+        cli_grip("close")
         rc, out = run_cli(["home", "--wait", "%.1f" % args.wait, "--tol", "40.0"],
                           timeout=args.wait + 25)
         show(out)
@@ -1863,7 +1869,7 @@ def main():
             print("\n→ 中断后自动收爪 + 回 home（再按一次 Ctrl+C 可强制退出）")
             _ABORT["flag"] = False
             try:
-                cli_grip("close", 4)
+                cli_grip("close")
                 rc_h, out_h = run_cli(
                     ["home", "--wait", "20.0", "--tol", "40.0"], timeout=45)
                 show(out_h)
@@ -2071,7 +2077,7 @@ def main():
     # 而下面紧接着就把 2~22 mm 的误差判成"抓稳"了 —— 说明本来就预期到不了。
     # 空爪到底只需 0.7 秒（舵机 time=1000ms），4 秒足够。
     _t = time.perf_counter()
-    rc, err = cli_grip("close", 4)
+    rc, err = cli_grip("close")
     record("pick_grip_close", time.perf_counter() - _t)
     rec["close_err"] = "" if err is None else "%.2f" % err
     if err is None:

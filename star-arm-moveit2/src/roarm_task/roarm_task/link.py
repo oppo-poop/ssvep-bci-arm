@@ -117,11 +117,14 @@ def grip(semantic: str, action: Optional[str] = None) -> Result:
                       detail="未知夹爪语义 %r，只接受 %s" % (semantic, list(config.GRIP_CMD)))
     cmd = config.GRIP_CMD[semantic]
     expect = config.GRIP_EXPECT[semantic]
-    # wait 4 s、tol 3 mm：闭合的期望值是"两指到底"，但夹着物料时到不了
-    # （50 mm 物料停在 48 mm 附近），误差永远超容差。原来 12 s + 1 mm
-    # 意味着**每次夹取都白等 12 秒**才判"未到位"——夹爪动作本身只要 0.7 s。
-    # tol 放到 3 mm：新爪 1 mm≈1.44°，3 mm 在舵机死区量级，不会误判。
-    argv = ["grip", cmd, "--wait", "4", "--tol", "3.0"]
+    # wait 取 config 的 GRIP_WAIT_S（当前 5 s）、tol 3 mm。
+    # 夹爪一次行程现在要 3.4 s（move_ms 3000 + 驱动 400 ms 缓冲，夹爪打印件脆，
+    # 2026-11-08 从 1000 ms 放慢），所以不能再像旧版那样给 4 s —— 只剩 0.6 s
+    # 余量，抖动一下就误判"没到位"。
+    # 不能给太长：闭合的期望值是"两指到底"，但夹着物料时到不了（50 mm 物料停在
+    # 48 mm 附近），误差永远超容差，长 wait 只会每次夹取白等满。
+    # tol 3 mm：新爪 1 mm≈1.44°，3 mm 在舵机死区量级，不会误判。
+    argv = ["grip", cmd, "--wait", "%.0f" % config.P.GRIP_WAIT_S, "--tol", "3.0"]
     res = call(argv, action or semantic)
     if res.ok:
         res.detail = "%s -> CLI '%s' -> joint7_left 期望 %.3f m；%s" % (
@@ -130,21 +133,26 @@ def grip(semantic: str, action: Optional[str] = None) -> Result:
 
 
 def grip_deg(deg: float, action: str = "grip_deg") -> Result:
-    """把夹爪开到指定舵机角度（实测 86.7°=闭合 4mm ~ 174.8°=张开 65mm）。
+    """把夹爪开到指定舵机角度。
+
+    `deg` 是**相对起栈基准**的偏移量（0° = 合拢 1.6 mm，-100° = 全开 50.9 mm），
+    基准由 robo_driver 在写方向加，这里只管相对量。
 
     `GripperCommand.msg` 只有 string，做不到连续开度；这条走 set_angle_topic。
 
     ⚠ `--tol` 必须收到 3 mm。默认 5 mm 时实测过：目标 48 mm、夹爪只走到 56.8 mm
     （误差 4.7 mm）就被判"到位"，而物体 50 mm —— 两指根本没碰到，夹空。
-    依据：新爪 88.1° 走 61 mm，1° ≈ 0.69 mm；舵机死区 0.5~0.8° ≈ 0.4~0.6 mm。
+    依据：新爪 100° 走 49.3 mm，1° ≈ 0.49 mm（曲线上后段更陡）；舵机死区 0.5~0.8°。
     """
-    # 同 grip()：按比例闭合夹着物料时到不了目标，长 wait 只会白等。
-    argv = ["grip_deg", "%.1f" % deg, "--wait", "4", "--tol", "3.0"]
+    # 同 grip()：按比例闭合夹着物料时到不了目标，长 wait 只会白等；
+    # 但一次行程要 3.4 s，wait 必须跟上（见 config.P.GRIP_WAIT_S）。
+    argv = ["grip_deg", "%.1f" % deg, "--wait",
+            "%.0f" % config.P.GRIP_WAIT_S, "--tol", "3.0"]
     return call(argv, action)
 
 
 def gripper_state() -> Optional[float]:
-    """读 joint7_left 实际位置（米）。0 = 两指张开（65 mm），-0.025 = 合拢（4 mm）。"""
+    """读 joint7_left 实际位置（米）。-0.025 = 合拢（两指 1.6 mm），0.000 = 全开（50.9 mm）。"""
     res = call(["where"], "where", timeout=25)
     if not res.ok:
         return None

@@ -51,6 +51,11 @@ GRIP_JOINT_MIN = -0.025
 GRIP_JOINT_MAX = 0.0
 GRIP_SERVO_SPAN = GRIP_DEG_OPEN - GRIP_DEG_CLOSE
 GRIP_JOINT_SPAN = GRIP_JOINT_MAX - GRIP_JOINT_MIN
+# 夹爪走完整个行程的时长（ms），对应 config/robot.json 的 gripper.move_ms。
+# 夹爪是 3D 打印件，1000 ms 走 100° 冲击太大（2026-11-08 打坏过），
+# 现在 3000 ms；驱动层还会再 +400 ms（interval = time + INTERVAL_PAD_MS），
+# 梯形加减速 acc = interval/2 跟着一起变柔。别调小。
+GRIP_MOVE_MS = 3000
 
 
 def _grip_shape_inv(y):
@@ -277,15 +282,33 @@ class RoboActionClient(Node):
         return CancelResponse.ACCEPT
 
     def gripper_execute_callback(self, goal_handle):
-        """执行夹爪命令 / execute gripper command"""
+        """执行夹爪命令 / execute gripper command
+
+        夹爪走完 100° 要 GRIP_MOVE_MS（3 s），**不能发完就 succeed**：
+        MoveIt 的夹爪控制器和仿真桥都把 action 结果当成"夹爪已到位"，
+        提前返回会让紧跟着的 move 在夹爪还在合的时候开始（2026-11-08 放慢后
+        这个时间差从 1.4 s 拉到 3.4 s，必须等）。
+        ReentrantCallbackGroup + MultiThreadedExecutor 允许这里阻塞而不挡
+        机械臂的轨迹回调，所以直接 sleep 切片等即可。
+        """
         pos = goal_handle.request.command.position
         # 构造单舵机 SetAngle / build single servo command
+        # 时长取 GRIP_MOVE_MS（3000 ms，慢开慢合）：夹爪打印件脆，1000 ms 会打坏。
         msg = SetAngle(
             servo_id=[6],
             target_angle=[jointstate2servoangle(6, pos)],
-            time=[1000],
+            time=[GRIP_MOVE_MS],
         )
         self.set_angle_publisher.publish(msg)
+
+        total = (GRIP_MOVE_MS + self.INTERVAL_PAD_MS) / 1000.0
+        t0 = time.time()
+        while time.time() - t0 < total:
+            if goal_handle.is_cancel_requested:
+                self.get_logger().warn('gripper: 取消，夹爪停在当前位置')
+                goal_handle.canceled()
+                return GripperCommand.Result()
+            time.sleep(0.05)
         goal_handle.succeed()
         return GripperCommand.Result()
 

@@ -138,7 +138,11 @@ private:
   {
     auto msg = robo_interfaces::msg::SetAngle();
     msg.servo_id = {6};
-    msg.time = {1000}; 
+    // 夹爪行程时长（ms），对应 config/robot.json 的 gripper.move_ms。
+    // 夹爪是 3D 打印件：1000 ms 走 100° 冲击太大（2026-11-08 打坏过），改 3000 ms。
+    // 驱动层还会再 +400 ms，梯形加减速 acc = interval/2 一起变柔。别调小。
+    constexpr int kGripMoveMs = 3000;
+    msg.time = {kGripMoveMs}; 
 
     // ⚠ 这里的角度是**相对起栈基准**的偏移量，不是绝对舵机角（2026-11-07 改）。
     //   换爪/断电后多圈零点会变，同一个绝对角两次起栈可以一次合拢一次张到顶，
