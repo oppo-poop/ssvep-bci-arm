@@ -44,8 +44,8 @@ def radians_to_degrees(radians):
 # 角度→间距是二次曲线（前 40° 基本空程），别退回线性。
 GRIP_DEG_CLOSE = 0.0
 GRIP_DEG_OPEN = -100.0
-GRIP_FULL_MM = 50.9
-GRIP_CURVE_K = 0.412
+GRIP_FULL_MM = 68.0
+GRIP_CURVE_K = 0.724861
 GRIP_GAP_MIN_MM = 1.6
 GRIP_JOINT_MIN = -0.025
 GRIP_JOINT_MAX = 0.0

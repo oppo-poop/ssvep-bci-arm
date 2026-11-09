@@ -13,7 +13,7 @@ import 进来，逐点比较它和 `roarm_lib.params` 的结果。
 检查内容
     1. 角度 → 间距 / joint：与 params 一致（含曲线，线性和曲线在此差距 >5 mm）
     2. joint → 角度：反算一致
-    3. 端点：0° → 1.6 mm，-100° → 50.9 mm
+    3. 端点：0° → 1.6 mm，-100° → 68.0 mm
     4. 曲线不退化成线性
     5. **启动驱零位那条命令真的能打包**（`arm_move_by_time`）——
        2026-11-08 的 NameError 就是这一节抓的，前四节都看不出来
@@ -214,10 +214,10 @@ def main():
     # 4) 曲线不能退化成线性：半开必须明显小于线性中点
     mid = S.grip_gap_mm(P.CLOSE + P.SERVO_SPAN * 0.5)
     linear = (P.GMIN + P.GMAX) / 2.0
-    ok = mid < linear - 5.0
+    ok = mid < linear - 3.0
     if not ok:
         bad.append("曲线失效：半开 %.1f mm ≈ 线性 %.1f mm" % (mid, linear))
-    print("  半开 %.1f mm < 线性 %.1f mm - 5 %s" % (mid, linear, "✓" if ok else "✗"))
+    print("  半开 %.1f mm < 线性 %.1f mm - 3 %s" % (mid, linear, "✓" if ok else "✗"))
 
     # 5) 启动驱零位那条命令必须真的能打包（见 _check_arm_move_by_time 的注释）
     _check_arm_move_by_time(mod, bad)

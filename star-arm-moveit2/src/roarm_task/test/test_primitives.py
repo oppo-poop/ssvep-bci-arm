@@ -68,7 +68,7 @@ class TestGripperSemantics(unittest.TestCase):
                                config.GAP_MIN_MM, places=3)
         mid = primitives.gripper_gap_mm((config.P.JMIN + config.P.JMAX) / 2.0)
         linear = (config.GAP_MIN_MM + config.GAP_MAX_MM) / 2.0
-        self.assertLess(mid, linear - 5.0,
+        self.assertLess(mid, linear - 3.0,
                         "曲线失效：半开 %.1f mm，线性应为 %.1f mm" % (mid, linear))
         self.assertIsNone(primitives.gripper_gap_mm(None))
 

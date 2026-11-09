@@ -27,12 +27,12 @@ std::vector<std::string> joint_name = {
 // 夹爪口径：与 config/robot.json 一致，由 scripts/checks/grip_check.py 强制检查。
 // 2026-11-07 队友标定（夹爪修复后）：角度是**相对起栈基准**的偏移，不是绝对舵机角。
 //   0°    = 基准位（合拢，joint -0.025，两指 1.6 mm）
-//   -100° = 再张 100°（全开，joint 0.000，两指 50.9 mm）
+//   -100° = 再张 100°（全开，joint 0.000，两指 68.0 mm）
 // 角度→间距是二次曲线（前 40° 基本空程）。录制的是相对量，回放时 robo_driver
 // 自己加基准，所以这里不需要、也不能知道基准是多少。
 constexpr double kGripCloseDeg = 0.0;
 constexpr double kGripOpenDeg = -100.0;
-constexpr double kGripCurveK = 0.412;
+constexpr double kGripCurveK = 0.724861;
 constexpr double kJointMin = -0.025;
 constexpr double kJointMax = 0.0;
 

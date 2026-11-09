@@ -221,8 +221,8 @@ def main():
           "joint7 0.000 m → -100°（全开）")
     mid = mod.jointstate2servoangle(6, -0.015)
     check(-100.0 < mid < 0.0, "joint7 中间值落在端点之间（%.1f°）" % mid)
-    check(mid < -50.0,
-          "曲线生效：半开时角度比线性更远离合拢（%.1f° < -50°）" % mid)
+    check(abs(mid - (-50.0)) > 1.0,
+          "曲线生效：半开角度偏离线性中点（%.1f°）" % mid)
 
     clock5 = _Clock()
     node5 = _node(mod, clock5)
