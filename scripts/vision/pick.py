@@ -63,6 +63,9 @@ SCENE_YAML = os.path.join(ROOT, "data", "scene_real.yaml")
 OFFSET_JSON = os.path.join(DATA, "grasp_offset.json")
 LOG_CSV = os.path.join(DATA, "pick_log.csv")
 XY_JSON = os.path.join(DATA, "xy_correction.json")
+#: 按 y 分档的手调补偿（左/中/右三点）。与 XY_JSON 的线性修正**叠加**：
+#: 线性模型管比例误差，分档表管"某些位置就是差几毫米"的常数偏移。
+XY_OFFSETS = os.path.join(DATA, "xy_offsets.json")
 PROBE_CSV = os.path.join(DATA, "probe_points.csv")
 
 #: 诊断图输出目录。--image 只是**可选的输出路径**，不指定就走这里，
@@ -229,6 +232,39 @@ def right_side_extra(y_mm, corr):
         return 0.0
     t = (p0_y - y_mm) / (p0_y - full_at)
     return dy * float(min(1.0, max(0.0, t)))
+
+
+def band_extra_xy(obj_xy, bands):
+    """按视觉原始 y 落档，返回 (dx, dy, 档名)。
+
+    2026-11-09 实测三个位置的补偿量是 (0,+40) / (−5,+15) / (0,+20)：
+    dy 随 y 非单调，把这三组数塞进 A 矩阵是无解的（解出来 m11 分别是
+    +0.154 / +2.50 / −0.100，符号都不一致）。它们本来就是三个独立的
+    常数偏移，所以按位置分档存，段内取常数、不做插值。
+    """
+    if not bands:
+        return 0.0, 0.0, ""
+    y = float(obj_xy[1])
+    for lo, hi, dx, dy, name in bands:
+        if lo <= y <= hi:
+            return dx, dy, name
+    # 落到所有档之外：取 y 最近的那一档，并在名字上标出来，别静默外推
+    best = min(bands, key=lambda b: min(abs(y - b[0]), abs(y - b[1])))
+    return best[2], best[3], best[4] + "(兜底)"
+
+
+def load_xy_offsets():
+    """读 data/vision/xy_offsets.json 的分档补偿；没有这个文件就返回 None。"""
+    if not os.path.isfile(XY_OFFSETS):
+        return None
+    try:
+        d = json.load(open(XY_OFFSETS, encoding="utf8"))
+        return [(float(b["y_min"]), float(b["y_max"]),
+                 float(b.get("dx", 0.0)), float(b.get("dy", 0.0)),
+                 str(b.get("name", ""))) for b in d.get("bands", [])]
+    except Exception as e:                              # noqa: BLE001
+        print("⚠ xy_offsets.json 读不出来(%s)，本次不做分档补偿" % e)
+        return None
 
 
 def apply_xy_correction(P_mm, corr):
@@ -1194,6 +1230,8 @@ def main():
                          % params.MAX_PICK_RADIUS_MM)
     ap.add_argument("--no-x-comp", action="store_true",
                     help="关闭远端 x 的 +20/-8 经验补偿（换爪或手动核对后用）")
+    ap.add_argument("--no-xy-offsets", action="store_true",
+                    help="关闭 xy_offsets.json 的左/中/右分档补偿（调试或对比时用）")
     ap.add_argument("--image", default=None,
                     help="叠加结果图保存路径")
     args = ap.parse_args()
@@ -1273,6 +1311,9 @@ def main():
         off_src += " +dxy(%+.0f,%+.0f)" % (dx, dy)
     R = quat_to_R(DEFAULT_QUAT)
     xy_corr = load_xy_correction()      # 米尺线性修正，没有就是 None
+    # 分档补偿（左/中/右手调三点）。和线性修正叠加，不互相替代：
+    # 线性管"越远越偏"的比例误差，分档管"这个位置就是差 15mm"的常数偏移。
+    xy_bands = None if args.no_xy_offsets else load_xy_offsets()
     record("calib_load", time.perf_counter() - _t_calib)
     # 点选投放的固定微调（物料坐标 mm）：优先 --place-dxy，其次读 json 里的
     # place_dx_mm / place_dy_mm。抓取准但投放整体偏一点时用它补，别去改 XY 修正
@@ -1709,6 +1750,17 @@ def main():
             print("     这里是线性外推，误差可能 10mm 以上。想准就二选一：")
             print("     · 把物料放到 |y|<150 内再抓")
             print("     · 或在当前位置用 --probe --record 补一个标定点，再 calib_xy --from-probe")
+
+    # ---- 3.6) 分档补偿（左/中/右手调三点），y 用**修正前**的视觉原始值判定
+    if xy_bands:
+        bdx, bdy, bname = band_extra_xy(P_raw_mm, xy_bands)
+        if bdx or bdy:
+            P_mm[0] += bdx
+            P_mm[1] += bdy
+            print("  XY 分档补偿[%s]：%+.0f, %+.0f mm（视觉 y=%+.0f）"
+                  % (bname, bdx, bdy, P_raw_mm[1]))
+        else:
+            print("  XY 分档补偿[%s]：0, 0（视觉 y=%+.0f）" % (bname, P_raw_mm[1]))
 
     # ---- 4) 夹爪偏移
     d_mm = R @ off_mm
