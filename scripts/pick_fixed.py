@@ -120,15 +120,21 @@ def get_point(d, kind, color, dz_mm=0.0):
 
 
 # ---------------------------------------------------------------- 单步动作
-def go_pose(x, y, z_send, args, what):
-    """走一个位姿。z_send 是**已经补过** z 补偿的值。"""
+def go_pose(x, y, z_send, args, what, wait=None):
+    """走一个位姿。z_send 是**已经补过** z 补偿的值。
+
+    wait 默认用 args.wait（下降等关键动作），过渡动作传 args.wait_fast。
+    为什么过渡动作要短：这台臂远端抬不过 z≈0.10，抬起那步**本来就到不了**，
+    等满只是白等 —— 原来每趟多花 40 秒。
+    """
+    w = args.wait if wait is None else wait
     argv = ["pose", "%.4f" % x, "%.4f" % y, "%.4f" % z_send]
-    argv += ["--wait", "%.0f" % args.wait, "--tol", "%.1f" % args.tol]
+    argv += ["--wait", "%.0f" % w, "--tol", "%.1f" % args.tol]
     if not args.no_force:
         argv.append("--force")
     print("  → %-18s (%.3f, %+.3f, %.3f)" % (what, x, y, z_send), flush=True)
     t0 = time.time()
-    rc, out = call(argv, timeout=args.wait + 40)
+    rc, out = call(argv, timeout=w + 40)
     if rc == 2:
         print("    ✗ 被拒绝（工作区/输入）")
         show_tail(out)
@@ -159,7 +165,7 @@ def go_gap(mm, args, what, tol=3.0, accept_blocked=False):
     deg = params.deg_of_gap(mm)
     print("  → %-18s 两指 %.1f mm（%.1f°）" % (what, mm, deg), flush=True)
     rc, out = call(["grip_deg", "%.2f" % deg,
-                    "--wait", "%.0f" % (params.GRIP_WAIT_S + 2),
+                    "--wait", "%.0f" % params.GRIP_WAIT_S,
                     "--tol", "%.1f" % tol], timeout=40)
     err = parse_err(out)
     if rc == 0:
@@ -205,7 +211,8 @@ def do_pick(d, args):
     # ① 先张开。合着爪下降 = 直接把指尖顶在物料上（会顶翻/压坏）
     if go_gap(open_mm, args, "取:张开", tol=5.0):
         return EXIT_FAIL
-    if go_pose(x, y, z_send + standoff, args, "取:上方") != EXIT_OK:
+    if go_pose(x, y, z_send + standoff, args, "取:上方",
+                wait=args.wait_fast) != EXIT_OK:
         print("    ⚠ 上方未完全到位，继续下降（差几毫米不影响夹取）")
     # 下降必须到位：它决定指尖落在物料哪一段
     if go_pose(x, y, z_send, args, "取:下降"):
@@ -216,7 +223,8 @@ def do_pick(d, args):
     # ③ 抬起：**不到位不中止**。这台臂在远端 z 抬不过 ~0.10（j2 力矩极限），
     #    而物料只有 7mm 高 —— 只要离桌了，横移就安全。真要卡在半路，
     #    下一步的横移会以失败报出来，比这里硬中止更容易判断。
-    if go_pose(x, y, z_send + lift, args, "取:抬起") != EXIT_OK:
+    if go_pose(x, y, z_send + lift, args, "取:抬起",
+                wait=args.wait_fast) != EXIT_OK:
         print("    ⚠ 抬起未完全到位，继续（离桌即可横移）")
     print("  ✓ 已夹住 %s 物料（目标开度 %.1f mm，过盈 %.0f mm）"
           % (args.color, close_mm, margin))
@@ -235,7 +243,8 @@ def do_place(d, args):
 
     # 「上方」只是过渡：差几毫米不影响放，判失败就中止反而把流程卡死
     # （这台臂本来就只有 10~20mm 精度）。判断保留用于日志，不用于拦路。
-    if go_pose(x, y, z_send + standoff, args, "放:上方") != EXIT_OK:
+    if go_pose(x, y, z_send + standoff, args, "放:上方",
+                wait=args.wait_fast) != EXIT_OK:
         print("    ⚠ 上方未完全到位，继续下降")
     # 「下降」必须到位：它决定物料落在哪
     if go_pose(x, y, z_send, args, "放:下降"):
@@ -243,7 +252,8 @@ def do_place(d, args):
     # 松开要开到比物宽大不少，靠摩擦带起物料就说明开得不够
     if go_gap(open_mm, args, "放:松爪", tol=5.0):
         return EXIT_FAIL
-    if go_pose(x, y, z_send + lift, args, "放:抬起") != EXIT_OK:
+    if go_pose(x, y, z_send + lift, args, "放:抬起",
+                wait=args.wait_fast) != EXIT_OK:
         print("    ⚠ 抬起未完全到位，继续（物料已放下）")
     print("  ✓ 已放到 %s 托盘" % args.pad)
     return EXIT_OK
@@ -284,8 +294,12 @@ def main():
     ap.add_argument("--grasp-dz-mm", type=float, default=None,
                     help="抓取高度微调（mm，负=更低）。只作用于物料点，不动托盘。"
                          "默认取 yaml 的 grasp_dz_mm")
-    ap.add_argument("--wait", type=float, default=40.0,
-                    help="每个位姿最长等待（秒）。默认速度 0.1 时 50mm 约 15s")
+    ap.add_argument("--wait", type=float, default=25.0,
+                    help="**关键动作**（下降）的最长等待（秒），默认 25")
+    ap.add_argument("--wait-fast", type=float, default=10.0,
+                    help="**过渡动作**（上方/抬起）的最长等待（秒），默认 10。"
+                         "这台臂远端抬不过 z≈0.10，抬起本来就到不了，"
+                         "等久只是白等")
     ap.add_argument("--tol", type=float, default=20.0,
                     help="到位容差（毫米）。实测残差 2~20mm（远端更大），"
                          "默认 20。别放到 30 以上 —— 会在运动途中判到位")
