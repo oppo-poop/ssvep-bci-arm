@@ -154,7 +154,7 @@ def parse_err(out):
     return float(m.group(1)) if m else None
 
 
-def go_gap(mm, args, what, tol=3.0, accept_blocked=False):
+def go_gap(mm, args, what, tol=3.0, accept_blocked=False, wait=None):
     """把两指开到指定间距（mm）。角度按 params 的二次曲线反算，别写线性。
 
     accept_blocked：夹着物料时**到不了目标**才是正常情况（物宽 > 目标开度），
@@ -164,9 +164,10 @@ def go_gap(mm, args, what, tol=3.0, accept_blocked=False):
     mm = max(params.GMIN, min(params.GMAX, float(mm)))
     deg = params.deg_of_gap(mm)
     print("  → %-18s 两指 %.1f mm（%.1f°）" % (what, mm, deg), flush=True)
+    w = params.GRIP_WAIT_S if wait is None else wait
     rc, out = call(["grip_deg", "%.2f" % deg,
-                    "--wait", "%.0f" % params.GRIP_WAIT_S,
-                    "--tol", "%.1f" % tol], timeout=40)
+                    "--wait", "%.0f" % w,
+                    "--tol", "%.1f" % tol], timeout=w + 20)
     err = parse_err(out)
     if rc == 0:
         print("    ✓ 到位（误差 %s mm）" % ("?" if err is None else "%.1f" % err))
@@ -182,7 +183,7 @@ def go_gap(mm, args, what, tol=3.0, accept_blocked=False):
 
 
 # ---------------------------------------------------------------- 流程
-def do_pick(d, args):
+def do_pick(d, args, lift_after=True):
     """取：张开 → 抬到上方 → 下降 → 夹 → 抬起。"""
     # 抓取高度微调：示教时人眼判"指尖贴住物料"容易偏高几毫米。
     # 只作用于物料点，托盘点不跟着降（降了会往下压托盘底）。
@@ -217,14 +218,20 @@ def do_pick(d, args):
     # 下降必须到位：它决定指尖落在物料哪一段
     if go_pose(x, y, z_send, args, "取:下降"):
         return EXIT_FAIL
-    # ② 夹紧：夹着物料时到不了目标才是对的，accept_blocked 放行 2~25mm 误差
-    if go_gap(close_mm, args, "取:夹紧", accept_blocked=True):
+    # ② 夹紧：夹着物料时到不了目标才是对的（误差 ≈ 过盈量）。
+    #    tol 收到 12 让它在贴住物料后就返回，别等满 5s —— 舵机自己会继续压到位，
+    #    CLI 只是不等它。等下一步「抬起」发出时，爪早就咬紧了。
+    if go_gap(close_mm, args, "取:夹紧", tol=12.0, wait=3.0,
+              accept_blocked=True):
         return EXIT_FAIL
-    # ③ 抬起：**不到位不中止**。这台臂在远端 z 抬不过 ~0.10（j2 力矩极限），
-    #    而物料只有 7mm 高 —— 只要离桌了，横移就安全。真要卡在半路，
-    #    下一步的横移会以失败报出来，比这里硬中止更容易判断。
-    if go_pose(x, y, z_send + lift, args, "取:抬起",
-                wait=args.wait_fast) != EXIT_OK:
+    # ③ 抬起。
+    #    lift_after=False（取完还要去托盘）时**跳过这一步**：单独垂直抬升正好撞在
+    #    这台臂的短板上（远端 z 抬不过 ~0.10，垂直抬最吃力）。让下一步的横移顺带
+    #    把高度带上去 —— MoveIt 一次规划斜线，比"先垂直抬到极限、再水平挪"顺得多，
+    #    还少一个动作。
+    #    lift_after=True（--no-place，取完要停住）才真的抬一下。
+    if lift_after and go_pose(x, y, z_send + lift, args, "取:抬起",
+                              wait=args.wait_fast) != EXIT_OK:
         print("    ⚠ 抬起未完全到位，继续（离桌即可横移）")
     print("  ✓ 已夹住 %s 物料（目标开度 %.1f mm，过盈 %.0f mm）"
           % (args.color, close_mm, margin))
@@ -243,8 +250,11 @@ def do_place(d, args):
 
     # 「上方」只是过渡：差几毫米不影响放，判失败就中止反而把流程卡死
     # （这台臂本来就只有 10~20mm 精度）。判断保留用于日志，不用于拦路。
+    # ⚠ 这一步是**大跨度横移**（物料点 x≈0.35~0.55 → 托盘 x≈0.56，y 还差 450mm），
+    # 必须给足时间。用 wait_fast(10s) 会在半路返回，紧接着的「下降」把横移打断，
+    # 表现就是"还没到托盘上方就往下扎"。
     if go_pose(x, y, z_send + standoff, args, "放:上方",
-                wait=args.wait_fast) != EXIT_OK:
+                wait=args.wait) != EXIT_OK:
         print("    ⚠ 上方未完全到位，继续下降")
     # 「下降」必须到位：它决定物料落在哪
     if go_pose(x, y, z_send, args, "放:下降"):
@@ -378,7 +388,11 @@ def main():
           % (standoff * 1000, lift * 1000,
              float(d.get("object_height", 0.0)) * 1000,
              open_mm, width_mm - margin, margin))
-    print("  顺序：张开 → 上方 → 下降 → 夹 → 抬起 → 托盘上方 → 下降 → 松开 → 抬起")
+    if args.no_place:
+        print("  顺序：张开 → 上方 → 下降 → 夹 → 抬起（停住）")
+    else:
+        print("  顺序：张开 → 上方 → 下降 → 夹 → 托盘上方（斜线，顺带抬高）"
+              " → 下降 → 松开 → 抬起")
     if args.dry_run:
         print("  --dry-run：不动机械臂")
         return EXIT_OK
@@ -397,7 +411,7 @@ def main():
 
     # ---- 取
     if not args.place_only:
-        rc = do_pick(d, args)
+        rc = do_pick(d, args, lift_after=bool(args.no_place))
         if rc != EXIT_OK:
             return rc
         if args.no_place:
