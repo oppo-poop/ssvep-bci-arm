@@ -119,6 +119,31 @@ def get_point(d, kind, color, dz_mm=0.0):
     return x, y, z + dz_mm / 1000.0, z + off + dz_mm / 1000.0
 
 
+def show_points(d, args):
+    """列出所有示教点位，以及换算后的命令值。
+
+    为什么要这个函数：物料被夹走之后，原位上就没东西了，光看桌面不知道
+    "它原本该在哪"。这里把示教值和补偿值一起打出来，既能看到真实位置，
+    也能看到实际会发给机械臂的数。
+    """
+    z_off = float(d.get("z_cmd_offset_m", 0.0)) * 1000.0
+    grasp_dz = args.grasp_dz_mm if args.grasp_dz_mm is not None \
+        else float(d.get("grasp_dz_mm", 0.0))
+    print("示教点位：%s" % args.yaml)
+    print("  z 命令补偿 %+.0f mm   抓取微调 %+.0f mm   物高 %.0f mm"
+          % (z_off, grasp_dz, float(d.get("object_height", 0.0)) * 1000))
+    print()
+    for kind, title, dz in (("objects", "物料（归位：--place-only --color X --to-object）",
+                             grasp_dz),
+                            ("pads", "托盘（--place-only --color X）", 0.0)):
+        print("%s" % title)
+        for name, xyz in d.get(kind, {}).items():
+            x, y, z = (float(v) for v in xyz)
+            print("  %-6s 实测 (%+.3f, %+.3f, %+.4f)   命令 z=%+.4f"
+                  % (name, x, y, z, z + (z_off + dz) / 1000.0))
+        print()
+
+
 # ---------------------------------------------------------------- 单步动作
 def go_pose(x, y, z_send, args, what, wait=None):
     """走一个位姿。z_send 是**已经补过** z 补偿的值。
@@ -239,8 +264,17 @@ def do_pick(d, args, lift_after=True):
 
 
 def do_place(d, args):
-    """放：抬到托盘上方 → 下降 → 张开 → 抬起。"""
-    x, y, z_real, z_send = get_point(d, "pads", args.pad)
+    """放：上方 → 下降 → 张开 → 抬起。
+
+    目标是托盘（默认），还是物料自己的示教原位（--to-object）。
+    """
+    if args.to_object:
+        # 归位：落到和抓取时同一个点（含 grasp_dz 微调），松爪后物料回到原处
+        grasp_dz = args.grasp_dz_mm if args.grasp_dz_mm is not None \
+            else float(d.get("grasp_dz_mm", 0.0))
+        x, y, z_real, z_send = get_point(d, "objects", args.color, grasp_dz)
+    else:
+        x, y, z_real, z_send = get_point(d, "pads", args.pad)
     standoff = args.standoff if args.standoff is not None \
         else float(d.get("standoff", 0.05))
     lift = args.lift if args.lift is not None \
@@ -317,15 +351,21 @@ def main():
                     help="不加 --force（点位 z 低于 bounds 下限时会被 CLI 拒绝）")
     ap.add_argument("--dry-run", action="store_true",
                     help="只打印将要走的点，不动机械臂")
+    ap.add_argument("--show", action="store_true",
+                    help="**列出所有示教点位**（物料 + 托盘），含补偿后的命令值，"
+                         "不动机械臂。不知道物料原来在哪就用这个")
+    ap.add_argument("--to-object", action="store_true",
+                    help="把物料放回**它自己的示教原位**（objects），而不是托盘。"
+                         "配 --place-only：物料已在爪里、想归位")
     ap.add_argument("--release", action="store_true",
                     help="**只张开夹爪放下物料**（不动臂），配 --no-home 则停在原地。"
                          "夹着物料想收手、或想手动摆位时用；不需要 --color")
     ap.add_argument("--json", action="store_true",
                     help="最后输出一行 JSON（给 arm_service 解析）")
     args = ap.parse_args()
-    # --release 之外都必须给颜色
-    if not args.release and not args.color:
-        ap.error("--color 必填（只有 --release 可以不带）")
+    # --release（松手）和 --show（列点位）之外都必须给颜色
+    if not args.release and not args.show and not args.color:
+        ap.error("--color 必填（--release / --show 可以不带）")
     args.pad = args.pad or args.color
 
     try:
@@ -333,6 +373,11 @@ def main():
     except SystemExit as e:
         print("✗ %s" % e, file=sys.stderr)
         return EXIT_REJECT
+
+    # ---- 只查点位：不动机械臂 ----
+    if args.show:
+        show_points(d, args)
+        return EXIT_OK
 
     # ---- 应急出口：只松开夹爪。夹着物料想收手、或者想手动摆位时用。
     # 位置控制的爪夹着时会一直顶着舵机，没有"夹着但不发力"的状态，
@@ -358,7 +403,10 @@ def main():
         print("✓ 已松开并回 home")
         return EXIT_OK
 
-    for kind, name in (("objects", args.color), ("pads", args.pad)):
+    need = [("objects", args.color)]
+    if not args.to_object:               # 归位到物料原位，不需要托盘
+        need.append(("pads", args.pad))
+    for kind, name in need:
         if name not in d[kind]:
             print("✗ %s 里没有 %s.%s" % (args.yaml, kind, name), file=sys.stderr)
             return EXIT_REJECT
@@ -367,7 +415,10 @@ def main():
     grasp_dz = args.grasp_dz_mm if args.grasp_dz_mm is not None \
         else float(d.get("grasp_dz_mm", 0.0))
     ox, oy, oz, oz_send = get_point(d, "objects", args.color, grasp_dz)
-    px, py, pz, pz_send = get_point(d, "pads", args.pad)
+    if args.to_object:
+        px, py, pz, pz_send = get_point(d, "objects", args.color, grasp_dz)
+    else:
+        px, py, pz, pz_send = get_point(d, "pads", args.pad)
     standoff = args.standoff if args.standoff is not None \
         else float(d.get("standoff", 0.05))
     width_mm = float(d.get("object_width", 0.05)) * 1000.0
@@ -377,11 +428,19 @@ def main():
         else float(d.get("grip_close_margin_mm", 10.0))
     z_off = float(d.get("z_cmd_offset_m", 0.0)) * 1000.0
     z_seed = float(d["objects"][args.color][2])
-    print("固定位置抓放：取 %s → 放 %s" % (args.color, args.pad))
+    print("固定位置抓放：取 %s → %s"
+          % (args.color,
+             "归位（放回原位）" if args.to_object else "放 %s" % args.pad))
     print("  物料 (%.3f, %+.3f)  z: 示教 %.3f %+.0f微调 %+.0f补偿 → 发 %.3f"
           % (ox, oy, z_seed, grasp_dz, z_off, oz_send))
-    print("  托盘 (%.3f, %+.3f)  z: 示教 %.3f          %+.0f补偿 → 发 %.3f"
-          % (px, py, float(d["pads"][args.pad][2]), z_off, pz_send))
+    if args.to_object:
+        print("  归位 (%.3f, %+.3f)  z: 示教 %.3f %+.0f微调 %+.0f补偿 → 发 %.3f"
+              "  ← 放回 %s 物料原位"
+              % (px, py, float(d["objects"][args.color][2]), grasp_dz, z_off,
+                 pz_send, args.color))
+    else:
+        print("  托盘 (%.3f, %+.3f)  z: 示教 %.3f          %+.0f补偿 → 发 %.3f"
+              % (px, py, float(d["pads"][args.pad][2]), z_off, pz_send))
     lift = args.lift if args.lift is not None \
         else float(d.get("lift", standoff))
     print("  接近 %.0fmm / 抬起 %.0fmm（物高 %.0fmm）→ 张 %.0fmm 合 %.0fmm（过盈 %.0fmm）"
@@ -391,8 +450,9 @@ def main():
     if args.no_place:
         print("  顺序：张开 → 上方 → 下降 → 夹 → 抬起（停住）")
     else:
-        print("  顺序：张开 → 上方 → 下降 → 夹 → 托盘上方（斜线，顺带抬高）"
-              " → 下降 → 松开 → 抬起")
+        print("  顺序：张开 → 上方 → 下降 → 夹 → %s（斜线，顺带抬高）"
+              " → 下降 → 松开 → 抬起"
+              % ("原位上方" if args.to_object else "托盘上方"))
     if args.dry_run:
         print("  --dry-run：不动机械臂")
         return EXIT_OK
