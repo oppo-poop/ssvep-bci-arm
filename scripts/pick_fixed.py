@@ -145,7 +145,7 @@ def show_points(d, args):
 
 
 # ---------------------------------------------------------------- 单步动作
-def go_pose(x, y, z_send, args, what, wait=None):
+def go_pose(x, y, z_send, args, what, wait=None, tol=None):
     """走一个位姿。z_send 是**已经补过** z 补偿的值。
 
     wait 默认用 args.wait（下降等关键动作），过渡动作传 args.wait_fast。
@@ -153,8 +153,9 @@ def go_pose(x, y, z_send, args, what, wait=None):
     等满只是白等 —— 原来每趟多花 40 秒。
     """
     w = args.wait if wait is None else wait
+    t = args.tol if tol is None else tol
     argv = ["pose", "%.4f" % x, "%.4f" % y, "%.4f" % z_send]
-    argv += ["--wait", "%.0f" % w, "--tol", "%.1f" % args.tol]
+    argv += ["--wait", "%.0f" % w, "--tol", "%.1f" % t]
     if not args.no_force:
         argv.append("--force")
     print("  → %-18s (%.3f, %+.3f, %.3f)" % (what, x, y, z_send), flush=True)
@@ -240,8 +241,13 @@ def do_pick(d, args, lift_after=True):
     if go_pose(x, y, z_send + standoff, args, "取:上方",
                 wait=args.wait_fast) != EXIT_OK:
         print("    ⚠ 上方未完全到位，继续下降（差几毫米不影响夹取）")
-    # 下降必须到位：它决定指尖落在物料哪一段
-    if go_pose(x, y, z_send, args, "取:下降"):
+    # 下降必须真的下去：它决定指尖落在物料哪一段。
+    # ⚠ tol 必须明显小于这段位移（上方→下降只有 standoff=30mm）。
+    #   用默认 20 时，臂走 10mm 就满足"距目标 20mm"→ 在 0.100 处就夹了，
+    #   物料在 0.070，结果夹空或夹到上沿（2026-11-10 就这么发生的）。
+    #   小 tol 会超时报"未到位"（这台臂有 10~20mm 系统偏差），
+    #   但 MoveIt 会把整条轨迹走完，位置是对的。
+    if go_pose(x, y, z_send, args, "取:下降", tol=6.0):
         return EXIT_FAIL
     # ② 夹紧：夹着物料时到不了目标才是对的（误差 ≈ 过盈量）。
     #    tol 收到 12 让它在贴住物料后就返回，别等满 5s —— 舵机自己会继续压到位，
@@ -255,8 +261,10 @@ def do_pick(d, args, lift_after=True):
     #    把高度带上去 —— MoveIt 一次规划斜线，比"先垂直抬到极限、再水平挪"顺得多，
     #    还少一个动作。
     #    lift_after=True（--no-place，取完要停住）才真的抬一下。
+    # tol 也要小于位移：抬 30mm 用 tol 20 时走 10mm 就判到了，
+    # 看起来"根本没抬"。这里收到 10，让它至少真的离开桌面一个物料高度。
     if lift_after and go_pose(x, y, z_send + lift, args, "取:抬起",
-                              wait=args.wait_fast) != EXIT_OK:
+                              wait=args.wait_fast, tol=10.0) != EXIT_OK:
         print("    ⚠ 抬起未完全到位，继续（离桌即可横移）")
     print("  ✓ 已夹住 %s 物料（目标开度 %.1f mm，过盈 %.0f mm）"
           % (args.color, close_mm, margin))
@@ -290,14 +298,15 @@ def do_place(d, args):
     if go_pose(x, y, z_send + standoff, args, "放:上方",
                 wait=args.wait) != EXIT_OK:
         print("    ⚠ 上方未完全到位，继续下降")
-    # 「下降」必须到位：它决定物料落在哪
-    if go_pose(x, y, z_send, args, "放:下降"):
+    # 「下降」必须真的下去：它决定物料落在哪。tol 同「取:下降」，
+    # 否则会在半空松爪 —— 用户看到的就是"没到 z 就张开了"。
+    if go_pose(x, y, z_send, args, "放:下降", tol=6.0):
         return EXIT_FAIL
     # 松开要开到比物宽大不少，靠摩擦带起物料就说明开得不够
     if go_gap(open_mm, args, "放:松爪", tol=5.0):
         return EXIT_FAIL
     if go_pose(x, y, z_send + lift, args, "放:抬起",
-                wait=args.wait_fast) != EXIT_OK:
+                wait=args.wait_fast, tol=10.0) != EXIT_OK:
         print("    ⚠ 抬起未完全到位，继续（物料已放下）")
     print("  ✓ 已放到 %s 托盘" % args.pad)
     return EXIT_OK
