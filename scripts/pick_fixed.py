@@ -105,17 +105,18 @@ def load_positions(path=POS_YAML):
     return d
 
 
-def get_point(d, kind, color):
+def get_point(d, kind, color, dz_mm=0.0):
     """取某个颜色物料/托盘的坐标（米），并算上 z 命令补偿。
 
-    返回 (x, y, z_real, z_send)。
+    返回 (x, y, z_real, z_send)。dz_mm 是额外的"抓取高度微调"（只用于物料点）：
+    示教时人眼判断"指尖贴住物料"，容易偏高几毫米，用它在不改示教值的前提下压低。
     """
     xyz = d[kind][color]
     if len(xyz) != 3:
         raise SystemExit("%s.%s 必须是 [x, y, z]" % (kind, color))
     x, y, z = (float(v) for v in xyz)
     off = float(d.get("z_cmd_offset_m", 0.0))
-    return x, y, z, z + off
+    return x, y, z + dz_mm / 1000.0, z + off + dz_mm / 1000.0
 
 
 # ---------------------------------------------------------------- 单步动作
@@ -177,7 +178,11 @@ def go_gap(mm, args, what, tol=3.0, accept_blocked=False):
 # ---------------------------------------------------------------- 流程
 def do_pick(d, args):
     """取：张开 → 抬到上方 → 下降 → 夹 → 抬起。"""
-    x, y, z_real, z_send = get_point(d, "objects", args.color)
+    # 抓取高度微调：示教时人眼判"指尖贴住物料"容易偏高几毫米。
+    # 只作用于物料点，托盘点不跟着降（降了会往下压托盘底）。
+    grasp_dz = args.grasp_dz_mm if args.grasp_dz_mm is not None \
+        else float(d.get("grasp_dz_mm", 0.0))
+    x, y, z_real, z_send = get_point(d, "objects", args.color, grasp_dz)
     standoff = args.standoff if args.standoff is not None \
         else float(d.get("standoff", 0.05))
     lift = args.lift if args.lift is not None else standoff
@@ -187,9 +192,14 @@ def do_pick(d, args):
     # 不必张到 68 全开 —— 只在取/放瞬间全开没意义，顶久了舵机发烫。
     open_mm = args.open_mm if args.open_mm is not None \
         else float(d.get("grip_open_mm", params.OPEN_TARGET_MM))
-    # 合拢目标比物宽小 2 mm：留 2 mm 过盈才夹得住，又不至于让舵机堵转。
-    # ⚠ 不能用 `grip close`（目标 4 mm），50 mm 物料会被压住还继续往里顶。
-    close_mm = width_mm - 2.0
+    # 合拢目标 = 物宽 − 过盈量。
+    # ⚠ 过盈量不能只给 2mm：这爪是**位置控制**，被物料挡住时实际停在物宽处，
+    #   目标离实际越近，舵机使的力越小 —— 差 2mm 基本是"搭着"，一抬就掉。
+    #   默认 10mm（50mm 物料 → 目标 40mm），舵机持续压迫才有夹持力。
+    #   代价是夹着的时候一直在顶，别长时间保持（会堵转发热）。
+    margin = args.close_margin if args.close_margin is not None \
+        else float(d.get("grip_close_margin_mm", 10.0))
+    close_mm = width_mm - margin
 
     # ① 先张开。合着爪下降 = 直接把指尖顶在物料上（会顶翻/压坏）
     if go_gap(open_mm, args, "取:张开", tol=5.0):
@@ -203,7 +213,8 @@ def do_pick(d, args):
         return EXIT_FAIL
     if go_pose(x, y, z_send + lift, args, "取:抬起"):
         return EXIT_FAIL
-    print("  ✓ 已夹住 %s 物料（目标开度 %.1f mm）" % (args.color, close_mm))
+    print("  ✓ 已夹住 %s 物料（目标开度 %.1f mm，过盈 %.0f mm）"
+          % (args.color, close_mm, margin))
     return EXIT_OK
 
 
@@ -257,6 +268,13 @@ def main():
                     help="张开开度（mm）。取物前用它套物料，放完也用它松爪；"
                          "默认取 yaml 的 grip_open_mm，再默认 open_target %.0f"
                          % params.OPEN_TARGET_MM)
+    ap.add_argument("--close-margin", type=float, default=None,
+                    help="合拢过盈量（mm）：合拢目标 = 物宽 − 这个值。"
+                         "默认取 yaml 的 grip_close_margin_mm（10）。"
+                         "太小会夹不紧——这是位置控制，目标离实际越近力越小")
+    ap.add_argument("--grasp-dz-mm", type=float, default=None,
+                    help="抓取高度微调（mm，负=更低）。只作用于物料点，不动托盘。"
+                         "默认取 yaml 的 grasp_dz_mm")
     ap.add_argument("--wait", type=float, default=40.0,
                     help="每个位姿最长等待（秒）。默认速度 0.1 时 50mm 约 15s")
     ap.add_argument("--tol", type=float, default=12.0,
@@ -283,20 +301,26 @@ def main():
             return EXIT_REJECT
 
     # ---- 打印计划（--dry-run 到此为止）
-    ox, oy, oz, oz_send = get_point(d, "objects", args.color)
+    grasp_dz = args.grasp_dz_mm if args.grasp_dz_mm is not None \
+        else float(d.get("grasp_dz_mm", 0.0))
+    ox, oy, oz, oz_send = get_point(d, "objects", args.color, grasp_dz)
     px, py, pz, pz_send = get_point(d, "pads", args.pad)
     standoff = args.standoff if args.standoff is not None \
         else float(d.get("standoff", 0.05))
     width_mm = float(d.get("object_width", 0.05)) * 1000.0
-    print("固定位置抓放：取 %s → 放 %s" % (args.color, args.pad))
-    print("  物料 (%.3f, %+.3f, %.3f)  z+%.0fmm 发出"
-          % (ox, oy, oz, (oz_send - oz) * 1000))
-    print("  托盘 (%.3f, %+.3f, %.3f)  z+%.0fmm 发出"
-          % (px, py, pz, (pz_send - pz) * 1000))
     open_mm = args.open_mm if args.open_mm is not None \
         else float(d.get("grip_open_mm", params.OPEN_TARGET_MM))
-    print("  接近 %.0fmm / 物宽 %.0fmm → 张 %.0fmm 合 %.0fmm"
-          % (standoff * 1000, width_mm, open_mm, width_mm - 2.0))
+    margin = args.close_margin if args.close_margin is not None \
+        else float(d.get("grip_close_margin_mm", 10.0))
+    z_off = float(d.get("z_cmd_offset_m", 0.0)) * 1000.0
+    z_seed = float(d["objects"][args.color][2])
+    print("固定位置抓放：取 %s → 放 %s" % (args.color, args.pad))
+    print("  物料 (%.3f, %+.3f)  z: 示教 %.3f %+.0f微调 %+.0f补偿 → 发 %.3f"
+          % (ox, oy, z_seed, grasp_dz, z_off, oz_send))
+    print("  托盘 (%.3f, %+.3f)  z: 示教 %.3f          %+.0f补偿 → 发 %.3f"
+          % (px, py, float(d["pads"][args.pad][2]), z_off, pz_send))
+    print("  接近 %.0fmm / 物宽 %.0fmm → 张 %.0fmm 合 %.0fmm（过盈 %.0fmm）"
+          % (standoff * 1000, width_mm, open_mm, width_mm - margin, margin))
     print("  顺序：张开 → 上方 → 下降 → 夹 → 抬起 → 托盘上方 → 下降 → 松开 → 抬起")
     if args.dry_run:
         print("  --dry-run：不动机械臂")
