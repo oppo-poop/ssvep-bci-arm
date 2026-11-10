@@ -247,7 +247,7 @@ def do_pick(d, args, lift_after=True):
     #   物料在 0.070，结果夹空或夹到上沿（2026-11-10 就这么发生的）。
     #   小 tol 会超时报"未到位"（这台臂有 10~20mm 系统偏差），
     #   但 MoveIt 会把整条轨迹走完，位置是对的。
-    if go_pose(x, y, z_send, args, "取:下降", tol=6.0):
+    if go_pose(x, y, z_send, args, "取:下降", wait=12.0, tol=6.0):
         return EXIT_FAIL
     # ② 夹紧：夹着物料时到不了目标才是对的（误差 ≈ 过盈量）。
     #    tol 收到 12 让它在贴住物料后就返回，别等满 5s —— 舵机自己会继续压到位，
@@ -300,15 +300,20 @@ def do_place(d, args):
         print("    ⚠ 上方未完全到位，继续下降")
     # 「下降」必须真的下去：它决定物料落在哪。tol 同「取:下降」，
     # 否则会在半空松爪 —— 用户看到的就是"没到 z 就张开了"。
-    if go_pose(x, y, z_send, args, "放:下降", tol=6.0):
+    if go_pose(x, y, z_send, args, "放:下降", wait=12.0, tol=6.0):
         return EXIT_FAIL
     # 松开要开到比物宽大不少，靠摩擦带起物料就说明开得不够
     if go_gap(open_mm, args, "放:松爪", tol=5.0):
         return EXIT_FAIL
-    if go_pose(x, y, z_send + lift, args, "放:抬起",
-                wait=args.wait_fast, tol=10.0) != EXIT_OK:
-        print("    ⚠ 抬起未完全到位，继续（物料已放下）")
-    print("  ✓ 已放到 %s 托盘" % args.pad)
+    # 到这里物料已经放下了 —— 立刻报，别让收尾动作吃掉这句话。
+    # 用户的原话："都已经放下物料了还不显示完成"。
+    print("  ✓ 物料已放到 %s 托盘（收尾：抬起/回位）" % args.pad, flush=True)
+    # 抬起只在不回 home 时才需要：回 home 本身就是条斜线，会把臂带离托盘。
+    # 单独"垂直抬起 30mm"在这台臂上要 18s 且经常到不了，纯属浪费。
+    if args.no_home:
+        if go_pose(x, y, z_send + lift, args, "放:抬起",
+                   wait=args.wait_fast, tol=10.0) != EXIT_OK:
+            print("    ⚠ 抬起未完全到位（物料已放下）")
     return EXIT_OK
 
 
@@ -501,9 +506,10 @@ def main():
     if args.no_place:
         print("  顺序：张开 → 上方 → 下降 → 夹 → 抬起（停住）")
     else:
+        tail = " → 抬起" if args.no_home else " → 回 home"
         print("  顺序：张开 → 上方 → 下降 → 夹 → %s（斜线，顺带抬高）"
-              " → 下降 → 松开 → 抬起"
-              % ("原位上方" if args.to_object else "托盘上方"))
+              " → 下降 → 松开%s"
+              % ("原位上方" if args.to_object else "托盘上方", tail))
     if args.dry_run:
         print("  --dry-run：不动机械臂")
         return EXIT_OK
