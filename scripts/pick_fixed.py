@@ -171,6 +171,27 @@ def show_points(d, args):
     print()
 
 
+def read_gap_mm():
+    """读夹爪两指实际间距（mm）。读不到返回 None。
+
+    为什么要这个：`grip_deg` 的 success 只看"关节位移误差在不在容差内"，
+    它分不清"夹住 50mm 物料"和"夹了个空"——空夹会合到底（4mm），
+    而夹偏一半时误差 13mm 也可能落在 accept_blocked 的范围里。
+    唯一可靠的证据是**读实际开度**：夹住 50mm 物料时它就该停在 50mm 左右。
+    """
+    import re as _re
+    rc, out = call(["where"], timeout=30)
+    if rc != 0:
+        return None
+    m = _re.search(r"joint7_left=([-\d.]+)", out)
+    if not m:
+        return None
+    try:
+        return params.gap_mm_from_joint(float(m.group(1)))
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
 # ---------------------------------------------------------------- 单步动作
 def go_pose(x, y, z_send, args, what, wait=None, tol=None):
     """走一个位姿。z_send 是**已经补过** z 补偿的值。
@@ -281,6 +302,22 @@ def do_pick(d, args, lift_after=True):
     if go_gap(close_mm, args, "取:夹紧", tol=12.0, wait=5.0,
               accept_blocked=True):
         return EXIT_FAIL
+    # 物理验证：读实际开度，对不对得上物料宽度。
+    # 这是唯一能区分"夹住了"和"夹了个空"的证据（见 read_gap_mm 的注释）。
+    # 容差取 6mm：夹住 50mm 物料时读数在 48~52；夹空会读到 56~68（指间没东西，
+    # 爪停在比物料宽的位置），6mm 能把这两种分开。实测 joint=-0.0031 → 57.8mm。
+    gap = read_gap_mm()
+    if gap is None:
+        print("    ⚠ 读不到夹爪开度，无法确认是否夹住")
+    elif abs(gap - width_mm) > 6.0:
+        print("    ✗ 夹爪实际开度 %.1f mm，物宽 %.0f mm —— 没夹住或夹偏了"
+              % (gap, width_mm))
+        print("      可能原因：下降没到物料中段（调 grasp_dz_mm）、"
+              "物料不在指间（x/y 偏）")
+        return EXIT_FAIL
+    else:
+        print("    ✓ 夹住确认：实际开度 %.1f mm（物宽 %.0f mm）"
+              % (gap, width_mm))
     # ③ 抬起。
     #    lift_after=False（取完还要去托盘）时**跳过这一步**：单独垂直抬升正好撞在
     #    这台臂的短板上（远端 z 抬不过 ~0.10，垂直抬最吃力）。让下一步的横移顺带
