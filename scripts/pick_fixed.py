@@ -140,39 +140,66 @@ def go_pose(x, y, z_send, args, what):
     return EXIT_OK
 
 
-def go_gap(mm, args, what):
-    """把两指开到指定间距（mm）。角度按 params 的二次曲线反算，别写线性。"""
+def parse_err(out):
+    """从 CLI 输出里抠出误差（mm）。成功/失败两种格式都有"误差 x mm"。"""
+    import re
+    m = re.search(r"误差\s*([\d.]+)\s*mm", out or "")
+    return float(m.group(1)) if m else None
+
+
+def go_gap(mm, args, what, tol=3.0, accept_blocked=False):
+    """把两指开到指定间距（mm）。角度按 params 的二次曲线反算，别写线性。
+
+    accept_blocked：夹着物料时**到不了目标**才是正常情况（物宽 > 目标开度），
+    CLI 会返回 rc=1 并报误差。这时只要误差在 2~25mm（说明确实咬住了东西），
+    就算成功 —— 这是 2026-11-07 grasp_closed_ok 那次踩出来的判据。
+    """
     mm = max(params.GMIN, min(params.GMAX, float(mm)))
     deg = params.deg_of_gap(mm)
     print("  → %-18s 两指 %.1f mm（%.1f°）" % (what, mm, deg), flush=True)
     rc, out = call(["grip_deg", "%.2f" % deg,
-                    "--wait", "%.0f" % params.GRIP_WAIT_S,
-                    "--tol", "3.0"], timeout=30)
-    if rc != 0:
-        print("    ✗ 夹爪未到位")
-        show_tail(out)
-        return EXIT_FAIL
-    print("    ✓ 到位")
-    return EXIT_OK
+                    "--wait", "%.0f" % (params.GRIP_WAIT_S + 2),
+                    "--tol", "%.1f" % tol], timeout=40)
+    err = parse_err(out)
+    if rc == 0:
+        print("    ✓ 到位（误差 %s mm）" % ("?" if err is None else "%.1f" % err))
+        return EXIT_OK
+    if accept_blocked and err is not None and 2.0 <= err <= 25.0:
+        print("    ✓ 已咬住（到不了 %.1f mm，误差 %.1f mm —— 夹着物料时这属正常）"
+              % (mm, err))
+        return EXIT_OK
+    print("    ✗ 夹爪未到位（rc=%d，误差 %s）"
+          % (rc, "?" if err is None else "%.1f mm" % err))
+    show_tail(out)
+    return EXIT_FAIL
 
 
 # ---------------------------------------------------------------- 流程
 def do_pick(d, args):
-    """取：抬高 → 下降 → 夹 → 抬起。"""
+    """取：张开 → 抬到上方 → 下降 → 夹 → 抬起。"""
     x, y, z_real, z_send = get_point(d, "objects", args.color)
     standoff = args.standoff if args.standoff is not None \
         else float(d.get("standoff", 0.05))
     lift = args.lift if args.lift is not None else standoff
     width_mm = float(d.get("object_width", 0.05)) * 1000.0
+    # 张开：套物料要的是**最大容错**，用 grip_open_mm（默认全开 GMAX），
+    # 不是放完松开用的 open_target（60mm）—— 那点余量单边只有 5mm，
+    # 下降稍微偏一点两指就顶在物料侧面。
+    open_mm = args.open_mm if args.open_mm is not None \
+        else float(d.get("grip_open_mm", params.GMAX))
     # 合拢目标比物宽小 2 mm：留 2 mm 过盈才夹得住，又不至于让舵机堵转。
     # ⚠ 不能用 `grip close`（目标 4 mm），50 mm 物料会被压住还继续往里顶。
     close_mm = width_mm - 2.0
 
+    # ① 先张开。合着爪下降 = 直接把指尖顶在物料上（会顶翻/压坏）
+    if go_gap(open_mm, args, "取:张开", tol=5.0):
+        return EXIT_FAIL
     if go_pose(x, y, z_send + standoff, args, "取:上方"):
         return EXIT_FAIL
     if go_pose(x, y, z_send, args, "取:下降"):
         return EXIT_FAIL
-    if go_gap(close_mm, args, "取:夹紧"):
+    # ② 夹紧：夹着物料时到不了目标才是对的，accept_blocked 放行 2~25mm 误差
+    if go_gap(close_mm, args, "取:夹紧", accept_blocked=True):
         return EXIT_FAIL
     if go_pose(x, y, z_send + lift, args, "取:抬起"):
         return EXIT_FAIL
@@ -181,18 +208,20 @@ def do_pick(d, args):
 
 
 def do_place(d, args):
-    """放：抬高 → 下降 → 张开 → 抬起。"""
+    """放：抬到托盘上方 → 下降 → 张开 → 抬起。"""
     x, y, z_real, z_send = get_point(d, "pads", args.pad)
     standoff = args.standoff if args.standoff is not None \
         else float(d.get("standoff", 0.05))
     lift = args.lift if args.lift is not None else standoff
+    open_mm = args.open_mm if args.open_mm is not None \
+        else float(d.get("grip_open_mm", params.GMAX))
 
     if go_pose(x, y, z_send + standoff, args, "放:上方"):
         return EXIT_FAIL
     if go_pose(x, y, z_send, args, "放:下降"):
         return EXIT_FAIL
-    # 张开到语义目标（默认 60 mm），不是机械极限 68 —— 顶在极限上会让舵机发烫
-    if go_gap(params.OPEN_TARGET_MM, args, "放:松爪"):
+    # 松开要开到比物宽大不少，靠摩擦带起物料就说明开得不够
+    if go_gap(open_mm, args, "放:松爪", tol=5.0):
         return EXIT_FAIL
     if go_pose(x, y, z_send + lift, args, "放:抬起"):
         return EXIT_FAIL
@@ -224,6 +253,10 @@ def main():
                     help="接近/撤离的竖直偏移（米），默认取 yaml 的 standoff")
     ap.add_argument("--lift", type=float, default=None,
                     help="抬起/撤离高度（米），默认同 standoff")
+    ap.add_argument("--open-mm", type=float, default=None,
+                    help="张开开度（mm）。取物前用它套物料，放完也用它松爪；"
+                         "默认取 yaml 的 grip_open_mm，再默认全开 %.0f"
+                         % params.GMAX)
     ap.add_argument("--wait", type=float, default=40.0,
                     help="每个位姿最长等待（秒）。默认速度 0.1 时 50mm 约 15s")
     ap.add_argument("--tol", type=float, default=12.0,
@@ -260,8 +293,11 @@ def main():
           % (ox, oy, oz, (oz_send - oz) * 1000))
     print("  托盘 (%.3f, %+.3f, %.3f)  z+%.0fmm 发出"
           % (px, py, pz, (pz_send - pz) * 1000))
-    print("  接近 %.0fmm / 物宽 %.0fmm → 合拢 %.0fmm"
-          % (standoff * 1000, width_mm, width_mm - 2.0))
+    open_mm = args.open_mm if args.open_mm is not None \
+        else float(d.get("grip_open_mm", params.GMAX))
+    print("  接近 %.0fmm / 物宽 %.0fmm → 张 %.0fmm 合 %.0fmm"
+          % (standoff * 1000, width_mm, open_mm, width_mm - 2.0))
+    print("  顺序：张开 → 上方 → 下降 → 夹 → 抬起 → 托盘上方 → 下降 → 松开 → 抬起")
     if args.dry_run:
         print("  --dry-run：不动机械臂")
         return EXIT_OK
