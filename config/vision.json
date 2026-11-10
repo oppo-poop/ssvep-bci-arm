@@ -10,7 +10,7 @@
       23.6,
       107.2
     ],
-    "z_cmd_offset_m": -0.001,
+    "z_cmd_offset_m": 0.014,
     "x_bias_mm": -2.0,
     "y_bias_mm": -1.0,
     "check_grasp": false
