@@ -14,6 +14,7 @@
 | `intent_bridge.py` | SSVEP 类别调试桥（生产路径在外部 `ssvep-bci`） | ✅ |
 | `arm_service.py` | 8 指令机械臂服务（Unix socket，给 ssvep-bci） | ✅ |
 | `arm_client.py` | 向 `arm_service` 发一条指令并等结果 | ✅ |
+| `kb_arm.py` | **键盘模拟 SSVEP**：按键代替脑电类别，走 arm_service 同一条链路（`--dwell` 可模拟注视时长） | ✅ |
 | `robot_up.sh` | 真机一键启动/停止；停止时一条 3 s 命令回收纳位并解锁力矩（`--no-park` 跳过） | ✅ |
 | `pick_fixed.py` | **固定位置**抓放（不连相机，坐标来自 `data/positions_6.yaml`），接口与 `pick.py` 同形 | ✅ |
 | `sim_up.sh` | 仿真一键起停 | ❌ 只动仿真 |
