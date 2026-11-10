@@ -243,9 +243,9 @@ def do_place(d, args):
 def main():
     ap = argparse.ArgumentParser(
         description="固定位置抓放（不连相机，坐标来自 data/positions_6.yaml）")
-    ap.add_argument("--color", required=True,
+    ap.add_argument("--color", default=None,
                     choices=("red", "green", "blue"),
-                    help="取哪个物料（与 pick.py --color 同义）")
+                    help="取哪个物料（与 pick.py --color 同义）；--release 时可省略")
     ap.add_argument("--pad", default=None,
                     choices=("red", "green", "blue"),
                     help="放到哪个托盘，默认与 --color 相同")
@@ -284,9 +284,15 @@ def main():
                     help="不加 --force（点位 z 低于 bounds 下限时会被 CLI 拒绝）")
     ap.add_argument("--dry-run", action="store_true",
                     help="只打印将要走的点，不动机械臂")
+    ap.add_argument("--release", action="store_true",
+                    help="**只张开夹爪放下物料**（不动臂），配 --no-home 则停在原地。"
+                         "夹着物料想收手、或想手动摆位时用；不需要 --color")
     ap.add_argument("--json", action="store_true",
                     help="最后输出一行 JSON（给 arm_service 解析）")
     args = ap.parse_args()
+    # --release 之外都必须给颜色
+    if not args.release and not args.color:
+        ap.error("--color 必填（只有 --release 可以不带）")
     args.pad = args.pad or args.color
 
     try:
@@ -294,6 +300,30 @@ def main():
     except SystemExit as e:
         print("✗ %s" % e, file=sys.stderr)
         return EXIT_REJECT
+
+    # ---- 应急出口：只松开夹爪。夹着物料想收手、或者想手动摆位时用。
+    # 位置控制的爪夹着时会一直顶着舵机，没有"夹着但不发力"的状态，
+    # 所以必须有一条明确的放手指令，否则人就卡在那儿了。
+    if args.release:
+        open_mm = args.open_mm if args.open_mm is not None \
+            else float(d.get("grip_open_mm", params.OPEN_TARGET_MM))
+        print("松开夹爪 → %.1f mm（臂不动）" % open_mm)
+        if args.dry_run:
+            print("  --dry-run：不动机械臂")
+            return EXIT_OK
+        if go_gap(open_mm, args, "松开", tol=5.0):
+            return EXIT_FAIL
+        if args.no_home:
+            print("✓ 已松开，停在原地")
+            return EXIT_OK
+        print("  → %-18s" % "回 home", flush=True)
+        r, out = call(["home", "--wait", "180", "--tol", "25"], timeout=220)
+        if r != 0:
+            print("    ✗ 回 home 失败（夹爪已松开）")
+            show_tail(out)
+            return EXIT_FAIL
+        print("✓ 已松开并回 home")
+        return EXIT_OK
 
     for kind, name in (("objects", args.color), ("pads", args.pad)):
         if name not in d[kind]:
@@ -344,7 +374,19 @@ def main():
         if rc != EXIT_OK:
             return rc
         if args.no_place:
-            print("\n✓ 取完（--no-place，停在原地，不回 home）")
+            margin = args.close_margin if args.close_margin is not None \
+                else float(d.get("grip_close_margin_mm", 10.0))
+            close_mm = float(d.get("object_width", 0.05)) * 1000.0 - margin
+            print()
+            print("✓ 取完，停在 %s 物料上方" % args.color)
+            print("  ⚠ 夹爪正以 %.0f mm 为目标顶着舵机：位置控制没有「夹着不发力」"
+                  "的状态，" % close_mm)
+            print("    一直这么举着会持续出力发热，尽快往下走。")
+            print("  下一步二选一：")
+            print("    python3 scripts/pick_fixed.py --place-only --color %s"
+                  "    # 放到托盘" % args.color)
+            print("    python3 scripts/pick_fixed.py --release"
+                  "                  # 松手，臂不动")
             return EXIT_OK
 
     # ---- 放
@@ -370,8 +412,17 @@ def main():
 
 
 if __name__ == "__main__":
+    _rc = EXIT_FAIL
     try:
-        sys.exit(main())
+        _rc = main()
     except KeyboardInterrupt:
-        print("\n⛔ Ctrl+C：已中断（物料状态未知，先 where 看一眼再动）")
-        sys.exit(130)
+        print("\n⛔ Ctrl+C：已中断（臂停住，夹爪保持当前开度）")
+        _rc = 130
+    finally:
+        # 失败/中断时最容易被卡住：物料还在爪里，而人不知道该敲什么。
+        # 这里把出口直接打出来，别让人去翻文档。
+        if _rc != EXIT_OK:
+            print("\n物料若还在夹爪里，按下面这条松手（臂不动）：")
+            print("  python3 scripts/pick_fixed.py --release --no-home")
+            print("臂位置不明先看一眼：  python3 scripts/roarm_cli.py where")
+    sys.exit(_rc)
