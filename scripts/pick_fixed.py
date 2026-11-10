@@ -119,6 +119,21 @@ def get_point(d, kind, color, dz_mm=0.0):
     return x, y, z + dz_mm / 1000.0, z + off + dz_mm / 1000.0
 
 
+def grasp_dz_for(d, color, args):
+    """抓取高度微调（mm）：命令行 > 按颜色 > 全局。
+
+    为什么需要按颜色：三个物料是分开示教的，高度判断各自有偏差
+    （2026-11-10 绿的就比另两个高 10mm）。全局一个数补不平，硬改示教值
+    又会让"实测记录"失真，所以单独留一层。
+    """
+    if args.grasp_dz_mm is not None:
+        return float(args.grasp_dz_mm)
+    over = (d.get("grasp_dz_mm_by_color") or {}).get(color)
+    if over is not None:
+        return float(over)
+    return float(d.get("grasp_dz_mm", 0.0))
+
+
 def show_points(d, args):
     """列出所有示教点位，以及换算后的命令值。
 
@@ -127,21 +142,33 @@ def show_points(d, args):
     也能看到实际会发给机械臂的数。
     """
     z_off = float(d.get("z_cmd_offset_m", 0.0)) * 1000.0
-    grasp_dz = args.grasp_dz_mm if args.grasp_dz_mm is not None \
-        else float(d.get("grasp_dz_mm", 0.0))
+    g_base = float(d.get("grasp_dz_mm", 0.0))
+    g_over = d.get("grasp_dz_mm_by_color") or {}
+    p_dz = args.place_dz_mm if args.place_dz_mm is not None \
+        else float(d.get("place_dz_mm", 0.0))
     print("示教点位：%s" % args.yaml)
-    print("  z 命令补偿 %+.0f mm   抓取微调 %+.0f mm   物高 %.0f mm"
-          % (z_off, grasp_dz, float(d.get("object_height", 0.0)) * 1000))
+    print("  z 命令补偿 %+.0f mm   物高 %.0f mm" %
+          (z_off, float(d.get("object_height", 0.0)) * 1000))
+    print("  抓取微调 %+.0f mm%s   放置微调 %+.0f mm"
+          % (g_base,
+             ("（按颜色覆盖：%s）" % "、".join(
+                 "%s %+.0f" % (k, float(v)) for k, v in g_over.items()))
+             if g_over else "",
+             p_dz))
     print()
-    for kind, title, dz in (("objects", "物料（归位：--place-only --color X --to-object）",
-                             grasp_dz),
-                            ("pads", "托盘（--place-only --color X）", 0.0)):
-        print("%s" % title)
-        for name, xyz in d.get(kind, {}).items():
-            x, y, z = (float(v) for v in xyz)
-            print("  %-6s 实测 (%+.3f, %+.3f, %+.4f)   命令 z=%+.4f"
-                  % (name, x, y, z, z + (z_off + dz) / 1000.0))
-        print()
+    print("物料（归位：--place-only --color X --to-object）")
+    for name, xyz in d.get("objects", {}).items():
+        x, y, z = (float(v) for v in xyz)
+        dz = grasp_dz_for(d, name, args)
+        print("  %-6s 实测 (%+.3f, %+.3f, %+.4f)  微调 %+.0f  命令 z=%+.4f"
+              % (name, x, y, z, dz, z + (z_off + dz) / 1000.0))
+    print()
+    print("托盘（--place-only --color X）")
+    for name, xyz in d.get("pads", {}).items():
+        x, y, z = (float(v) for v in xyz)
+        print("  %-6s 实测 (%+.3f, %+.3f, %+.4f)  微调 %+.0f  命令 z=%+.4f"
+              % (name, x, y, z, p_dz, z + (z_off + p_dz) / 1000.0))
+    print()
 
 
 # ---------------------------------------------------------------- 单步动作
@@ -213,8 +240,7 @@ def do_pick(d, args, lift_after=True):
     """取：张开 → 抬到上方 → 下降 → 夹 → 抬起。"""
     # 抓取高度微调：示教时人眼判"指尖贴住物料"容易偏高几毫米。
     # 只作用于物料点，托盘点不跟着降（降了会往下压托盘底）。
-    grasp_dz = args.grasp_dz_mm if args.grasp_dz_mm is not None \
-        else float(d.get("grasp_dz_mm", 0.0))
+    grasp_dz = grasp_dz_for(d, args.color, args)
     x, y, z_real, z_send = get_point(d, "objects", args.color, grasp_dz)
     standoff = args.standoff if args.standoff is not None \
         else float(d.get("standoff", 0.05))
@@ -278,11 +304,13 @@ def do_place(d, args):
     """
     if args.to_object:
         # 归位：落到和抓取时同一个点（含 grasp_dz 微调），松爪后物料回到原处
-        grasp_dz = args.grasp_dz_mm if args.grasp_dz_mm is not None \
-            else float(d.get("grasp_dz_mm", 0.0))
-        x, y, z_real, z_send = get_point(d, "objects", args.color, grasp_dz)
+        x, y, z_real, z_send = get_point(d, "objects", args.color,
+                                         grasp_dz_for(d, args.color, args))
     else:
-        x, y, z_real, z_send = get_point(d, "pads", args.pad)
+        # 托盘统一微调：三种托盘的示教高度一致，偏差也一致，一个数就够
+        place_dz = args.place_dz_mm if args.place_dz_mm is not None \
+            else float(d.get("place_dz_mm", 0.0))
+        x, y, z_real, z_send = get_point(d, "pads", args.pad, place_dz)
     standoff = args.standoff if args.standoff is not None \
         else float(d.get("standoff", 0.05))
     lift = args.lift if args.lift is not None \
@@ -351,7 +379,10 @@ def main():
                          "太小会夹不紧——这是位置控制，目标离实际越近力越小")
     ap.add_argument("--grasp-dz-mm", type=float, default=None,
                     help="抓取高度微调（mm，负=更低）。只作用于物料点，不动托盘。"
-                         "默认取 yaml 的 grasp_dz_mm")
+                         "默认取 yaml 的 grasp_dz_mm（可按颜色用 grasp_dz_mm_by_color 覆盖）")
+    ap.add_argument("--place-dz-mm", type=float, default=None,
+                    help="放置高度微调（mm，负=更低）。只作用于托盘，不动物料。"
+                         "默认取 yaml 的 place_dz_mm")
     ap.add_argument("--wait", type=float, default=25.0,
                     help="**关键动作**（下降）的最长等待（秒），默认 25")
     ap.add_argument("--wait-fast", type=float, default=25.0,
@@ -468,13 +499,14 @@ def main():
             return EXIT_REJECT
 
     # ---- 打印计划（--dry-run 到此为止）
-    grasp_dz = args.grasp_dz_mm if args.grasp_dz_mm is not None \
-        else float(d.get("grasp_dz_mm", 0.0))
+    grasp_dz = grasp_dz_for(d, args.color, args)
     ox, oy, oz, oz_send = get_point(d, "objects", args.color, grasp_dz)
+    place_dz = args.place_dz_mm if args.place_dz_mm is not None \
+        else float(d.get("place_dz_mm", 0.0))
     if args.to_object:
         px, py, pz, pz_send = get_point(d, "objects", args.color, grasp_dz)
     else:
-        px, py, pz, pz_send = get_point(d, "pads", args.pad)
+        px, py, pz, pz_send = get_point(d, "pads", args.pad, place_dz)
     standoff = args.standoff if args.standoff is not None \
         else float(d.get("standoff", 0.05))
     width_mm = float(d.get("object_width", 0.05)) * 1000.0
@@ -495,8 +527,9 @@ def main():
               % (px, py, float(d["objects"][args.color][2]), grasp_dz, z_off,
                  pz_send, args.color))
     else:
-        print("  托盘 (%.3f, %+.3f)  z: 示教 %.3f          %+.0f补偿 → 发 %.3f"
-              % (px, py, float(d["pads"][args.pad][2]), z_off, pz_send))
+        print("  托盘 (%.3f, %+.3f)  z: 示教 %.3f %+.0f微调 %+.0f补偿 → 发 %.3f"
+              % (px, py, float(d["pads"][args.pad][2]), place_dz, z_off,
+                 pz_send))
     lift = args.lift if args.lift is not None \
         else float(d.get("lift", standoff))
     print("  接近 %.0fmm / 抬起 %.0fmm（物高 %.0fmm）→ 张 %.0fmm 合 %.0fmm（过盈 %.0fmm）"
