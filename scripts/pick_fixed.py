@@ -205,8 +205,9 @@ def do_pick(d, args):
     # ① 先张开。合着爪下降 = 直接把指尖顶在物料上（会顶翻/压坏）
     if go_gap(open_mm, args, "取:张开", tol=5.0):
         return EXIT_FAIL
-    if go_pose(x, y, z_send + standoff, args, "取:上方"):
-        return EXIT_FAIL
+    if go_pose(x, y, z_send + standoff, args, "取:上方") != EXIT_OK:
+        print("    ⚠ 上方未完全到位，继续下降（差几毫米不影响夹取）")
+    # 下降必须到位：它决定指尖落在物料哪一段
     if go_pose(x, y, z_send, args, "取:下降"):
         return EXIT_FAIL
     # ② 夹紧：夹着物料时到不了目标才是对的，accept_blocked 放行 2~25mm 误差
@@ -232,8 +233,11 @@ def do_place(d, args):
     open_mm = args.open_mm if args.open_mm is not None \
         else float(d.get("grip_open_mm", params.OPEN_TARGET_MM))
 
-    if go_pose(x, y, z_send + standoff, args, "放:上方"):
-        return EXIT_FAIL
+    # 「上方」只是过渡：差几毫米不影响放，判失败就中止反而把流程卡死
+    # （这台臂本来就只有 10~20mm 精度）。判断保留用于日志，不用于拦路。
+    if go_pose(x, y, z_send + standoff, args, "放:上方") != EXIT_OK:
+        print("    ⚠ 上方未完全到位，继续下降")
+    # 「下降」必须到位：它决定物料落在哪
     if go_pose(x, y, z_send, args, "放:下降"):
         return EXIT_FAIL
     # 松开要开到比物宽大不少，靠摩擦带起物料就说明开得不够
@@ -282,9 +286,9 @@ def main():
                          "默认取 yaml 的 grasp_dz_mm")
     ap.add_argument("--wait", type=float, default=40.0,
                     help="每个位姿最长等待（秒）。默认速度 0.1 时 50mm 约 15s")
-    ap.add_argument("--tol", type=float, default=12.0,
-                    help="到位容差（毫米）。实测残差 2~6mm，取 12 留余量；"
-                         "别为了日志好看放大到 30（会读到半路位置）")
+    ap.add_argument("--tol", type=float, default=20.0,
+                    help="到位容差（毫米）。实测残差 2~20mm（远端更大），"
+                         "默认 20。别放到 30 以上 —— 会在运动途中判到位")
     ap.add_argument("--no-force", action="store_true",
                     help="不加 --force（点位 z 低于 bounds 下限时会被 CLI 拒绝）")
     ap.add_argument("--dry-run", action="store_true",

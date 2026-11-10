@@ -155,19 +155,24 @@ def send(sock_path, line, timeout=600):
 
 
 def show(resp):
-    """把响应打印成人看得懂的一行。"""
+    """把响应打印成人看得懂的一行。
+
+    失败时显示 detail 的**尾部**：pick_fixed 会先打计划再打每一步，
+    真正出错的那行在最后，截前面等于什么都没看到。
+    """
     if resp is None:
         return
     state = resp.get("state", "?")
     label = STATE_CN.get(state, state)
-    detail = resp.get("detail") or ""
+    detail = (resp.get("detail") or "").replace("\n", " ")
+    if len(detail) > 240:
+        detail = ("…" + detail[-240:]) if state in ("failed", "error") \
+            else (detail[:240] + "…")
     holding = resp.get("holding")
-    extra = ""
+    print("  %s %s" % (label, detail.strip()))
     if holding:
-        extra = "（手上：%s）" % holding
-    print("  %s %s" % (label, detail.replace("\n", " ")[:200]))
-    if extra:
-        print("  " + extra)
+        print("  ⚠ 物料还在爪里（holding=%s）。要松手："
+              "python3 scripts/pick_fixed.py --release --no-home" % holding)
 
 
 # ---------------------------------------------------------------- 主循环
