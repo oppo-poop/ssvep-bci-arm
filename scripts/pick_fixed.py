@@ -246,7 +246,7 @@ def do_pick(d, args, lift_after=True):
     # ② 夹紧：夹着物料时到不了目标才是对的（误差 ≈ 过盈量）。
     #    tol 收到 12 让它在贴住物料后就返回，别等满 5s —— 舵机自己会继续压到位，
     #    CLI 只是不等它。等下一步「抬起」发出时，爪早就咬紧了。
-    if go_gap(close_mm, args, "取:夹紧", tol=12.0, wait=3.0,
+    if go_gap(close_mm, args, "取:夹紧", tol=12.0, wait=5.0,
               accept_blocked=True):
         return EXIT_FAIL
     # ③ 抬起。
@@ -340,10 +340,10 @@ def main():
                          "默认取 yaml 的 grasp_dz_mm")
     ap.add_argument("--wait", type=float, default=25.0,
                     help="**关键动作**（下降）的最长等待（秒），默认 25")
-    ap.add_argument("--wait-fast", type=float, default=10.0,
-                    help="**过渡动作**（上方/抬起）的最长等待（秒），默认 10。"
-                         "这台臂远端抬不过 z≈0.10，抬起本来就到不了，"
-                         "等久只是白等")
+    ap.add_argument("--wait-fast", type=float, default=25.0,
+                    help="**过渡动作**（上方/抬起）的最长等待（秒），默认 25。"
+                         "实测抬升只有 1.7mm/s，抬 30mm 要 18s —— 给 10s 会在"
+                         "半路返回，下一步立刻打断，表现就是「没抬起来就去托盘」")
     ap.add_argument("--tol", type=float, default=20.0,
                     help="到位容差（毫米）。实测残差 2~20mm（远端更大），"
                          "默认 20。别放到 30 以上 —— 会在运动途中判到位")
