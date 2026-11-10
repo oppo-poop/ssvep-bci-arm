@@ -351,6 +351,13 @@ def main():
                     help="不加 --force（点位 z 低于 bounds 下限时会被 CLI 拒绝）")
     ap.add_argument("--dry-run", action="store_true",
                     help="只打印将要走的点，不动机械臂")
+    ap.add_argument("--goto", metavar="COLOR",
+                    choices=("red", "green", "blue"),
+                    help="**只定位**：移到该物料的示教点、张开夹爪、停住。"
+                         "不抓、不放、不回 home —— 用来手动放物料或核对位置")
+    ap.add_argument("--goto-pad", metavar="COLOR",
+                    choices=("red", "green", "blue"),
+                    help="同上，目标是该颜色的托盘")
     ap.add_argument("--show", action="store_true",
                     help="**列出所有示教点位**（物料 + 托盘），含补偿后的命令值，"
                          "不动机械臂。不知道物料原来在哪就用这个")
@@ -364,8 +371,9 @@ def main():
                     help="最后输出一行 JSON（给 arm_service 解析）")
     args = ap.parse_args()
     # --release（松手）和 --show（列点位）之外都必须给颜色
-    if not args.release and not args.show and not args.color:
-        ap.error("--color 必填（--release / --show 可以不带）")
+    if not (args.release or args.show or args.goto or args.goto_pad) \
+            and not args.color:
+        ap.error("--color 必填（--release / --show / --goto 可以不带）")
     args.pad = args.pad or args.color
 
     try:
@@ -377,6 +385,40 @@ def main():
     # ---- 只查点位：不动机械臂 ----
     if args.show:
         show_points(d, args)
+        return EXIT_OK
+
+    # ---- 只定位：移到某个示教点 + 张开夹爪 + 停住 ----
+    # 用途是"手动把物料放进去"或"核对示教位置对不对"，所以：
+    #   · 不加 standoff（要的是那个点本身，不是点上方的悬停）
+    #   · 张开但不夹、不下降、不回 home
+    if args.goto or args.goto_pad:
+        name = args.goto or args.goto_pad
+        kind = "objects" if args.goto else "pads"
+        if name not in d[kind]:
+            print("✗ %s 里没有 %s.%s" % (args.yaml, kind, name), file=sys.stderr)
+            return EXIT_REJECT
+        gdz = args.grasp_dz_mm if args.grasp_dz_mm is not None \
+            else float(d.get("grasp_dz_mm", 0.0))
+        gx, gy, gz, gz_send = get_point(d, kind, name,
+                                        gdz if kind == "objects" else 0.0)
+        open_mm = args.open_mm if args.open_mm is not None \
+            else float(d.get("grip_open_mm", params.OPEN_TARGET_MM))
+        print("定位到 %s.%s → (%.3f, %+.3f) 命令 z=%.3f，张开 %.0f mm 后停住"
+              % (kind, name, gx, gy, gz_send, open_mm))
+        if args.dry_run:
+            print("  --dry-run：不动机械臂")
+            return EXIT_OK
+        # 先张开再移动：合着爪移过去，指尖可能顶到旁边的物料
+        if go_gap(open_mm, args, "张开", tol=5.0):
+            return EXIT_FAIL
+        if go_pose(gx, gy, gz_send, args, "定位") != EXIT_OK:
+            print("    ⚠ 没完全到位，但位置已接近，可以手动放料")
+        print()
+        print("✓ 已到位并张开，物料放进两指之间即可。之后：")
+        print("    python3 scripts/roarm_cli.py grip close --wait 8 --tol 5")
+        print("        → 合上夹住（空爪会合到底；有物料会压住，误差 2~25mm 属正常）")
+        print("    python3 scripts/pick_fixed.py --release --no-home")
+        print("        → 只是松开，不动臂")
         return EXIT_OK
 
     # ---- 应急出口：只松开夹爪。夹着物料想收手、或者想手动摆位时用。
