@@ -50,7 +50,12 @@ if str(HERE) not in sys.path:
 
 from roarm_lib import paths, params  # noqa: E402
 
-PICK = paths.SCRIPTS / "vision" / "pick.py"
+#: 固定位置模式：坐标来自 data/positions_6.yaml，不连相机、不识别颜色。
+#:   ROARM_FIXED=1 python3 scripts/arm_service.py
+#: 指令表、socket 协议、忙时丢弃、STOP 语义全部不变 —— 脑电那边一行都不用改。
+FIXED = os.environ.get("ROARM_FIXED", "0") == "1"
+PICK = paths.SCRIPTS / ("pick_fixed.py" if FIXED
+                        else "vision/pick.py")
 CLI = paths.SCRIPTS / "roarm_cli.py"
 DEFAULT_SOCKET = paths.DATA / "arm.sock"
 TIMING_JSONL = paths.DATA_VISION / "timing.jsonl"
@@ -208,35 +213,48 @@ class Controller:
     # ------------------------------------------------------------ 动作
     def _pick(self, color, label):
         self.last_color = None
-        _t = time.perf_counter()
-        self.refresh_trays(log=True)
-        _timing("refresh_trays", time.perf_counter() - _t, color=color)
-        cmd = [PY_PICK, str(PICK), "--auto", "--color", color,
-               "--no-place", "--hold-here", "--no-show"]
+        if FIXED:
+            # 固定位置：不拍照、不识别托盘，坐标来自 data/positions_6.yaml。
+            # refresh_trays 也不做 —— 那要走相机，固定模式不需要。
+            cmd = [PY_PICK, str(PICK), "--color", color,
+                   "--no-place", "--hold-here"]
+        else:
+            _t = time.perf_counter()
+            self.refresh_trays(log=True)
+            _timing("refresh_trays", time.perf_counter() - _t, color=color)
+            cmd = [PY_PICK, str(PICK), "--auto", "--color", color,
+                   "--no-place", "--hold-here", "--no-show"]
         _t = time.perf_counter()
         rc, out = self._run(cmd, timeout=240)
         _timing("pick_subprocess", time.perf_counter() - _t, color=color, rc=rc)
         if rc != 0:
             return self._resp(label, "failed", out)
         self.last_color = color
-        detail = ("已夹住 %s 物料，等待放置" % color if params.GRASP_CHECK
-                  else "已执行夹取（夹取判断已关闭，空夹）")
+        if FIXED:
+            detail = "已夹住 %s 物料（固定位置），等待放置" % color
+        else:
+            detail = ("已夹住 %s 物料，等待放置" % color if params.GRASP_CHECK
+                      else "已执行夹取（夹取判断已关闭，空夹）")
         return self._resp(label, "ok", detail)
 
     def _place(self, color, label):
         if not self.last_color:
             return self._resp(label, "no_object", "手上没有物料，先执行 pick")
-        uv = self.trays.get(color)
-        if uv is None:
-            self.refresh_trays(log=True)
+        if FIXED:
+            # 固定位置：按颜色查 pads[color]，不需要托盘像素
+            cmd = [PY_PICK, str(PICK), "--place-only", "--color", color]
+        else:
             uv = self.trays.get(color)
-        if uv is None:
-            return self._resp(label, "no_tray",
-                              "没有 %s 托盘像素；放 data/vision/trays.json "
-                              "或先跑 detect_color.py --pads" % color)
-        cmd = [PY_PICK, str(PICK), "--place-only",
-               "--drop-u", "%.1f" % uv[0], "--drop-v", "%.1f" % uv[1],
-               "--no-show"]
+            if uv is None:
+                self.refresh_trays(log=True)
+                uv = self.trays.get(color)
+            if uv is None:
+                return self._resp(label, "no_tray",
+                                  "没有 %s 托盘像素；放 data/vision/trays.json "
+                                  "或先跑 detect_color.py --pads" % color)
+            cmd = [PY_PICK, str(PICK), "--place-only",
+                   "--drop-u", "%.1f" % uv[0], "--drop-v", "%.1f" % uv[1],
+                   "--no-show"]
         _t = time.perf_counter()
         rc, out = self._run(cmd, timeout=240)
         _timing("place_subprocess", time.perf_counter() - _t,

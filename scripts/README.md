@@ -15,6 +15,7 @@
 | `arm_service.py` | 8 指令机械臂服务（Unix socket，给 ssvep-bci） | ✅ |
 | `arm_client.py` | 向 `arm_service` 发一条指令并等结果 | ✅ |
 | `robot_up.sh` | 真机一键启动/停止；停止时一条 3 s 命令回收纳位并解锁力矩（`--no-park` 跳过） | ✅ |
+| `pick_fixed.py` | **固定位置**抓放（不连相机，坐标来自 `data/positions_6.yaml`），接口与 `pick.py` 同形 | ✅ |
 | `sim_up.sh` | 仿真一键起停 | ❌ 只动仿真 |
 | `run_task.sh` | 取放连跑 N 次，日志进 `data/runs/` | ✅ |
 | `install_moveit.sh` / `fix_moveit_install.sh` | 环境安装/修复 | ❌ |
