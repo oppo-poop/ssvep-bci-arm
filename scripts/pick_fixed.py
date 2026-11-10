@@ -185,7 +185,8 @@ def do_pick(d, args):
     x, y, z_real, z_send = get_point(d, "objects", args.color, grasp_dz)
     standoff = args.standoff if args.standoff is not None \
         else float(d.get("standoff", 0.05))
-    lift = args.lift if args.lift is not None else standoff
+    lift = args.lift if args.lift is not None \
+        else float(d.get("lift", standoff))
     width_mm = float(d.get("object_width", 0.05)) * 1000.0
     # 张开：用 grip_open_mm（默认 open_target 60mm ≡ grip 0.9）。
     # 60mm 对 50mm 物料单边 5mm 余量，链神 2026-11-10 确认够用；
@@ -211,8 +212,11 @@ def do_pick(d, args):
     # ② 夹紧：夹着物料时到不了目标才是对的，accept_blocked 放行 2~25mm 误差
     if go_gap(close_mm, args, "取:夹紧", accept_blocked=True):
         return EXIT_FAIL
-    if go_pose(x, y, z_send + lift, args, "取:抬起"):
-        return EXIT_FAIL
+    # ③ 抬起：**不到位不中止**。这台臂在远端 z 抬不过 ~0.10（j2 力矩极限），
+    #    而物料只有 7mm 高 —— 只要离桌了，横移就安全。真要卡在半路，
+    #    下一步的横移会以失败报出来，比这里硬中止更容易判断。
+    if go_pose(x, y, z_send + lift, args, "取:抬起") != EXIT_OK:
+        print("    ⚠ 抬起未完全到位，继续（离桌即可横移）")
     print("  ✓ 已夹住 %s 物料（目标开度 %.1f mm，过盈 %.0f mm）"
           % (args.color, close_mm, margin))
     return EXIT_OK
@@ -223,7 +227,8 @@ def do_place(d, args):
     x, y, z_real, z_send = get_point(d, "pads", args.pad)
     standoff = args.standoff if args.standoff is not None \
         else float(d.get("standoff", 0.05))
-    lift = args.lift if args.lift is not None else standoff
+    lift = args.lift if args.lift is not None \
+        else float(d.get("lift", standoff))
     open_mm = args.open_mm if args.open_mm is not None \
         else float(d.get("grip_open_mm", params.OPEN_TARGET_MM))
 
@@ -234,8 +239,8 @@ def do_place(d, args):
     # 松开要开到比物宽大不少，靠摩擦带起物料就说明开得不够
     if go_gap(open_mm, args, "放:松爪", tol=5.0):
         return EXIT_FAIL
-    if go_pose(x, y, z_send + lift, args, "放:抬起"):
-        return EXIT_FAIL
+    if go_pose(x, y, z_send + lift, args, "放:抬起") != EXIT_OK:
+        print("    ⚠ 抬起未完全到位，继续（物料已放下）")
     print("  ✓ 已放到 %s 托盘" % args.pad)
     return EXIT_OK
 
@@ -349,8 +354,12 @@ def main():
           % (ox, oy, z_seed, grasp_dz, z_off, oz_send))
     print("  托盘 (%.3f, %+.3f)  z: 示教 %.3f          %+.0f补偿 → 发 %.3f"
           % (px, py, float(d["pads"][args.pad][2]), z_off, pz_send))
-    print("  接近 %.0fmm / 物宽 %.0fmm → 张 %.0fmm 合 %.0fmm（过盈 %.0fmm）"
-          % (standoff * 1000, width_mm, open_mm, width_mm - margin, margin))
+    lift = args.lift if args.lift is not None \
+        else float(d.get("lift", standoff))
+    print("  接近 %.0fmm / 抬起 %.0fmm（物高 %.0fmm）→ 张 %.0fmm 合 %.0fmm（过盈 %.0fmm）"
+          % (standoff * 1000, lift * 1000,
+             float(d.get("object_height", 0.0)) * 1000,
+             open_mm, width_mm - margin, margin))
     print("  顺序：张开 → 上方 → 下降 → 夹 → 抬起 → 托盘上方 → 下降 → 松开 → 抬起")
     if args.dry_run:
         print("  --dry-run：不动机械臂")
