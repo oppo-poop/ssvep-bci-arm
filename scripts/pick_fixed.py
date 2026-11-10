@@ -182,11 +182,11 @@ def do_pick(d, args):
         else float(d.get("standoff", 0.05))
     lift = args.lift if args.lift is not None else standoff
     width_mm = float(d.get("object_width", 0.05)) * 1000.0
-    # 张开：套物料要的是**最大容错**，用 grip_open_mm（默认全开 GMAX），
-    # 不是放完松开用的 open_target（60mm）—— 那点余量单边只有 5mm，
-    # 下降稍微偏一点两指就顶在物料侧面。
+    # 张开：用 grip_open_mm（默认 open_target 60mm ≡ grip 0.9）。
+    # 60mm 对 50mm 物料单边 5mm 余量，链神 2026-11-10 确认够用；
+    # 不必张到 68 全开 —— 只在取/放瞬间全开没意义，顶久了舵机发烫。
     open_mm = args.open_mm if args.open_mm is not None \
-        else float(d.get("grip_open_mm", params.GMAX))
+        else float(d.get("grip_open_mm", params.OPEN_TARGET_MM))
     # 合拢目标比物宽小 2 mm：留 2 mm 过盈才夹得住，又不至于让舵机堵转。
     # ⚠ 不能用 `grip close`（目标 4 mm），50 mm 物料会被压住还继续往里顶。
     close_mm = width_mm - 2.0
@@ -214,7 +214,7 @@ def do_place(d, args):
         else float(d.get("standoff", 0.05))
     lift = args.lift if args.lift is not None else standoff
     open_mm = args.open_mm if args.open_mm is not None \
-        else float(d.get("grip_open_mm", params.GMAX))
+        else float(d.get("grip_open_mm", params.OPEN_TARGET_MM))
 
     if go_pose(x, y, z_send + standoff, args, "放:上方"):
         return EXIT_FAIL
@@ -255,8 +255,8 @@ def main():
                     help="抬起/撤离高度（米），默认同 standoff")
     ap.add_argument("--open-mm", type=float, default=None,
                     help="张开开度（mm）。取物前用它套物料，放完也用它松爪；"
-                         "默认取 yaml 的 grip_open_mm，再默认全开 %.0f"
-                         % params.GMAX)
+                         "默认取 yaml 的 grip_open_mm，再默认 open_target %.0f"
+                         % params.OPEN_TARGET_MM)
     ap.add_argument("--wait", type=float, default=40.0,
                     help="每个位姿最长等待（秒）。默认速度 0.1 时 50mm 约 15s")
     ap.add_argument("--tol", type=float, default=12.0,
@@ -294,7 +294,7 @@ def main():
     print("  托盘 (%.3f, %+.3f, %.3f)  z+%.0fmm 发出"
           % (px, py, pz, (pz_send - pz) * 1000))
     open_mm = args.open_mm if args.open_mm is not None \
-        else float(d.get("grip_open_mm", params.GMAX))
+        else float(d.get("grip_open_mm", params.OPEN_TARGET_MM))
     print("  接近 %.0fmm / 物宽 %.0fmm → 张 %.0fmm 合 %.0fmm"
           % (standoff * 1000, width_mm, open_mm, width_mm - 2.0))
     print("  顺序：张开 → 上方 → 下降 → 夹 → 抬起 → 托盘上方 → 下降 → 松开 → 抬起")
