@@ -35,8 +35,10 @@ import argparse
 import atexit
 import json
 import os
+import select
 import shlex
 import signal
+import socket
 import socketserver
 import subprocess
 import sys
@@ -58,6 +60,11 @@ PICK = paths.SCRIPTS / ("pick_fixed.py" if FIXED
                         else "vision/pick.py")
 CLI = paths.SCRIPTS / "roarm_cli.py"
 DEFAULT_SOCKET = paths.DATA / "arm.sock"
+
+#: 执行动作期间，客户端连接必须保持；断开就打断动作。
+#: KEEPALIVE_S > 0 时还要求客户端在这么多秒内发过任意数据（心跳），否则也打断。
+#: 默认 0 = 只查断开，不查心跳 —— 现有客户端是「一连接一指令」，执行期间不发数据。
+KEEPALIVE_S = float(os.environ.get("ARM_KEEPALIVE_S", "0") or 0)
 TIMING_JSONL = paths.DATA_VISION / "timing.jsonl"
 
 
@@ -210,6 +217,40 @@ class Controller:
         return self._resp("停止", "stopped" if rc == 0 else "failed",
                           "已停止并回零位" if rc == 0 else out)
 
+    def abort(self, reason="客户端断开"):
+        """断连自停：打断当前动作并收爪，**不回 home**（原地保持）。
+
+        和 stop() 的区别很重要：
+            stop  是操作者主动停 —— 他知道现场情况，回零位是安全的。
+            abort 是"控制端没了" —— 此时不能假设周围安全，**原地保持**比
+            自动跑一段轨迹更稳妥。收爪是为了：物料若在指间能夹住不摔，
+            不在就合到底，避免臂带着张开的爪停着。
+
+        返回是否真的打断了某个子进程。
+        """
+        _t0 = time.perf_counter()
+        p = self.proc
+        hit = False
+        if p is not None and p.poll() is None:
+            hit = True
+            try:
+                p.send_signal(signal.SIGINT)       # 让子脚本走取消/保持
+                p.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                p.terminate()
+                try:
+                    p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+        self.proc = None
+        self._ros(["grip", "close", "--wait", "4"], timeout=20)
+        with self.lock:
+            self.busy = False
+        _timing("abort", time.perf_counter() - _t0, hit=int(hit), reason=reason)
+        print("[服务] abort(%s)：打断=%s，已收爪，原地保持（未回 home）"
+              % (reason, hit), flush=True)
+        return hit
+
     # ------------------------------------------------------------ 动作
     def _pick(self, color, label):
         self.last_color = None
@@ -359,10 +400,80 @@ class Controller:
 
 
 class _Handler(socketserver.StreamRequestHandler):
+    """一连接一指令。**执行期间盯着这条连接**：客户端断了就打断动作。
+
+    为什么必须盯：动作要跑 30~60 秒，这期间如果脑电侧崩了/拔线了/被 kill 了，
+    没人知道臂还在走。旧实现里 handle() 阻塞在 execute() 上，连接断了也看不见。
+    """
+
+    def _peer_problem(self, last_seen):
+        """返回 (异常原因 or None, 是否收到心跳)。
+
+        非阻塞查：连接可读 + recv(MSG_PEEK) 返回空 = 对端已关闭（EOF）。
+        有心跳需求时，还可以在 KEEPALIVE_S 内没收到任何数据就判超时。
+        """
+        try:
+            r, _, _ = select.select([self.request], [], [], 0)
+        except (OSError, ValueError):
+            return "连接异常", False
+        if not r:
+            if KEEPALIVE_S > 0 and time.time() - last_seen > KEEPALIVE_S:
+                return "心跳超时(%.0fs)" % KEEPALIVE_S, False
+            return None, False
+        try:
+            data = self.request.recv(1, socket.MSG_PEEK)
+        except OSError:
+            return "连接异常", False
+        if not data:
+            return "断开", False
+        # 有数据 = 心跳。读掉，别让它堆在缓冲里（协议是"一行一指令"，多出来的没用）
+        try:
+            self.request.recv(4096)
+        except OSError:
+            pass
+        return None, True
+
     def handle(self):
         line = self.rfile.readline().decode("utf-8", "replace")
-        resp = self.server.controller.execute(line)
-        self.wfile.write((json.dumps(resp, ensure_ascii=False) + "\n").encode())
+        ctrl = self.server.controller
+        box = {}
+
+        def _work():
+            try:
+                box["resp"] = ctrl.execute(line)
+            except Exception as exc:                   # noqa: BLE001
+                box["resp"] = ctrl._resp(None, "error",
+                                         "%s: %s" % (type(exc).__name__, exc))
+
+        th = threading.Thread(target=_work, daemon=True)
+        th.start()
+
+        last_seen = time.time()
+        reason = None
+        while th.is_alive():
+            th.join(0.25)
+            if not th.is_alive():
+                break
+            reason, beat = self._peer_problem(last_seen)
+            if beat:
+                last_seen = time.time()     # 只有真收到数据才续期
+            if reason is None:
+                continue
+            print("[服务] 客户端%s → 打断当前动作" % reason, flush=True)
+            ctrl.abort(reason)
+            th.join(30)                    # 等动作线程收尾
+            break
+
+        resp = box.get("resp")
+        if resp is None:
+            resp = ctrl._resp(None, "aborted",
+                              "客户端%s，已打断并收爪，原地保持（未回 home）"
+                              % (reason or "断开"))
+        try:
+            self.wfile.write((json.dumps(resp, ensure_ascii=False) + "\n").encode())
+            self.wfile.flush()
+        except OSError:
+            pass                           # 客户端已断，写不出去是正常的
 
 
 class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

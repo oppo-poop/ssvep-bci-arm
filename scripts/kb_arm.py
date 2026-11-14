@@ -77,6 +77,7 @@ STATE_CN = {
     "no_tray": "✗ 找不到托盘",
     "failed": "✗ 失败",
     "error": "✗ 出错",
+    "aborted": "⚡ 断连自停（已收爪，原地保持）",
 }
 
 

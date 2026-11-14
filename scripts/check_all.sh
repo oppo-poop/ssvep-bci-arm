@@ -15,22 +15,25 @@ python3 -m compileall -q \
   star-arm-moveit2/src/cello_controller/cello_controller \
   star-arm-moveit2/src/robo_driver/robo_driver
 
-echo "== 2/6 参数派生自测 =="
+echo "== 2/7 参数派生自测 =="
 python3 scripts/roarm_lib/params.py
 
-echo "== 3/6 任务层单元测试 =="
+echo "== 3/7 任务层单元测试 =="
 (cd star-arm-moveit2/src/roarm_task && python3 -m unittest discover -s test)
 
-echo "== 4/6 夹爪口径 =="
+echo "== 4/7 夹爪口径 =="
 python3 scripts/checks/grip_check.py
 python3 scripts/checks/grip_math_check.py
 
-echo "== 5/6 视觉 / 轨迹回归 =="
+echo "== 5/7 视觉 / 轨迹回归 =="
 python3 scripts/checks/pick_check.py
 python3 scripts/checks/traj_check.py
 
-echo "== 6/6 8 指令服务 =="
+echo "== 6/7 8 指令服务 =="
 python3 scripts/checks/arm_service_check.py
+
+echo "== 7/7 断连自停 =="
+python3 scripts/checks/check_disconnect.py
 
 echo
 echo "✓ 全部离线检查通过。"
