@@ -310,12 +310,17 @@ class Arm_contorl(Node):
                         "夹爪基准不可用，拒绝执行（臂不受影响）；"
                         "先跑 scripts/servo_check.py 查舵机 6")
                     angle = self.Servo.grip_base_deg
-            self.target_angle[id] = int(10 * (angle + offset))
+            self.target_angle[id] = int(round(10 * (angle + offset)))
             if int(msg.time[i]) < 40:
                 (msg.time[i]) = 40
             self.interval[id] = int(msg.time[i])+400
 
-            self.arm_move_by_time()
+        # ★ 2026-11-19：这一行原来缩在 for 循环里 —— 一条 6 轴命令会连发
+        #   6 次「全 7 轴同步写」，前 5 次带的是半更新的目标。现在等本帧所有
+        #   关节都算完，只发 1 次；而且只发 msg.servo_id 里的轴，动臂时不重发
+        #   夹爪、动夹爪时不重发臂。
+        if len(msg.servo_id) > 0:
+            self.arm_move_by_time(msg.servo_id)
 
     # 定时任务 / Timer callback
     def timer_callback(self):
@@ -382,13 +387,47 @@ class Arm_contorl(Node):
         return True
 
     # 默认：控制by时间 / Default control mode: time-based
-    def arm_move_by_time(self):
-        acc = [0.0 for _ in range(self.Servo.SRV_NUM)]
-        for i in range(self.Servo.SRV_NUM):
-            acc[i] = int(self.interval[i]/2)
+    def arm_move_by_time(self, servo_ids=None):
+        """按时间下发目标角度。
+
+        servo_ids=None   启动驱零位 / 保持姿态：7 轴全发，acc 仍取 interval/2
+                         （柔和斜坡；grip_math_check 会断言 3000/1500/1500）
+        servo_ids=[...]  运行期轨迹：只发这几轴，普通关节改用 25% 梯形加减速
+
+        为什么普通关节不再用 interval/2
+            协议里 `<BlLHHH` 的第 4、5 个字段是「启动加速时间 / 运动减速时间」
+            （单位 ms）。acc = interval/2 意味着加速 + 减速正好吃满整个时长，
+            **没有匀速段** —— 这是三角形速度曲线，峰值速度是平均速度的 2 倍
+            （2d/T）。改成 25% 后变成梯形：峰值速度 1.33d/T（降 33%），
+            中段有 50% 时长的匀速段。中途那种"点头"、跟踪滞后就出在这里。
+            代价：峰值加速度从 4d/T² 涨到 5.33d/T²（+33%），绝对值仍远低于
+            舵机上限（max_acceleration 2.0 rad/s²，25% 缩放下只用 0.6）。
+
+        夹爪（id 6）为什么保持 interval/2
+            它是位置控制，夹持力靠"目标与实际之差"（过盈量）。改加减速只会让
+            咬合的时机更难判，而且夹爪指令本来就不该跟着臂的轨迹参数走。
+        """
+        ids = (
+            list(range(self.Servo.SRV_NUM))
+            if servo_ids is None
+            else list(dict.fromkeys(int(x) for x in servo_ids))
+        )
+        acc = [0 for _ in range(self.Servo.SRV_NUM)]
+        for i in ids:
+            if servo_ids is None or i == 6:
+                acc[i] = int(self.interval[i] / 2)
+            else:
+                # 25% 梯形，夹在 [80, 500] ms：下限防止极短命令变成阶跃输入，
+                # 上限防止长命令的加速段拖太久。2*acc < interval 恒成立
+                # （interval ≥ 40+400 = 440 → 25% = 110，远小于 220）。
+                acc[i] = max(80, min(500, int(self.interval[i] * 0.25)))
         power_mw = int(os.environ.get("CELLO_POWER_MW", str(self.Servo.GRIP_POWER_MW)))
-        command_data_list = [struct.pack("<BlLHHH", i, self.target_angle[i], self.interval[i], acc[i], acc[i], power_mw) for i in range(self.Servo.SRV_NUM)]
-        self.Servo.set_angle_by_interval(self.Servo.SRV_NUM, command_data_list)
+        command_data_list = [
+            struct.pack("<BlLHHH", i, self.target_angle[i], self.interval[i],
+                        acc[i], acc[i], power_mw)
+            for i in ids
+        ]
+        self.Servo.set_angle_by_interval(len(ids), command_data_list)
 
 
 
