@@ -10,7 +10,14 @@
 参考资料/
 
 # star-arm-moveit2 已并入本仓库（原为独立仓库，2026-10-19 合并）
-# 它自己的 .gitignore 会排除 build/ install/ log/，不用在这里重复
+# 它自己的 .gitignore 会排除 build/ install/ log/；下面三条管的是**仓库根**的同名目录。
+# 根这三个是 2026-11-08 在仓库根误跑了一次 colcon 留下的产物，脚本从不引用
+# （robot_up.sh / sim_up.sh 里的 WS 恒指 star-arm-moveit2），但一直没被忽略，
+# `git status -uall` 里挂着 320 个未跟踪文件 —— 一次 `git add .` 就会把 33 MB
+# 二进制写进历史，而 git 历史不可逆。加前导斜杠 = 只匹配仓库根，不误伤子目录。
+/build/
+/install/
+/log/
 
 # Python
 __pycache__/
@@ -25,10 +32,16 @@ __pycache__/
 data/runs/*.log
 
 # 标定文件的临时备份（fix_extrinsics 生成）
+# `*.bak` 盖不住带日期的 `xxx.bak_1104` —— 2026-11-19 发现两个这种文件
+# 裸露在未跟踪区，`git add .` 会把它们一起带进历史。
 *.bak
+*.bak_*
 
 # 抓取日志：运行时逐条追加，进仓库只会不断冲突
 data/vision/pick_log.csv
+# 同上，但这是**仓库根 data/** 下的那两份（2026-11-19 发现漏了根目录）
+data/pick_log.csv
+data/probe_points.csv
 
 # 阶段 0 计时日志（pick.py / arm_service.py 追加）
 data/vision/timing.jsonl
