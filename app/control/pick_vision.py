@@ -65,21 +65,21 @@ CLI = str(paths.CLI)
 SCENE_YAML = str(paths.SCENE_REAL)
 
 OFFSET_JSON = os.path.join(DATA, "grasp_offset.json")
-LOG_CSV = os.path.join(DATA, "pick_log.csv")
+LOG_CSV = str(paths.RUNTIME / "pick_log.csv")
 XY_JSON = os.path.join(DATA, "xy_correction.json")
 #: 按 y 分档的手调补偿（左/中/右三点）。与 XY_JSON 的线性修正**叠加**：
 #: 线性模型管比例误差，分档表管"某些位置就是差几毫米"的常数偏移。
 XY_OFFSETS = os.path.join(DATA, "xy_offsets.json")
-PROBE_CSV = os.path.join(DATA, "probe_points.csv")
+PROBE_CSV = str(paths.RUNTIME / "probe_points.csv")
 
 #: 诊断图输出目录。--image 只是**可选的输出路径**，不指定就走这里，
 #: 免得没给参数时 cv2.imwrite(None, ...) 崩在最后一步。
-PREVIEW_DIR = os.path.join(DATA, "preview")
+PREVIEW_DIR = str(paths.RUNTIME_PREVIEW)
 
 # ---------------------------------------------------------------- 计时
 # 阶段 0：把一条指令的时间拆分写进 data/vision/timing.jsonl，供后续优化排序。
 # 只记录，不改变任何动作逻辑；文件是运行产物，已进 .gitignore。
-TIMING_JSONL = os.path.join(DATA, "timing.jsonl")
+TIMING_JSONL = str(paths.TIMING_JSONL)
 _T_START = time.perf_counter()
 _TIMINGS = []
 _MODE = "unknown"
@@ -1357,7 +1357,7 @@ def main():
         if close_grip:
             cli_grip("close")
             print("  夹爪已闭合")
-        rc2, out2 = run_cli(["home", "--wait", "%.1f" % args.wait, "--tol", "40.0"],
+        rc2, out2 = run_cli(["home", "--wait", "%.1f" % args.wait, "--tol", "35.0"],
                             timeout=args.wait + 25)
         show(out2)
         if rc2 != 0:
@@ -1542,19 +1542,18 @@ def main():
         #   ① 垂直抬 25mm 脱离物料（此时两指还在物料两侧，直接斜收会刮倒）
         #   ② 再按 pull_in 往底座方向收着往上（和 [5/7] 抬起同一个办法）
         # ① 先垂直脱离 25mm（两指还在物料两侧，此时横向走会把它带倒）
-        _lift0 = np.array([pl6[0], pl6[1], min(travel_z, pl6[2] + 25.0)])
-        # 只要比投放高度高 20mm 就够脱离物料；达到后不再为一个更高的
-        # travel_z 白等一轮（放置后"停滞很久"的主要来源之一）。
         clear_z = float(pl6[2] + 20.0)
-        _t = time.perf_counter()
-        rc_l0, act_l0 = lift_to(_lift0, args, tol=max(args.tol, 22.0),
-                                min_z=clear_z)
-        record("place_clear", time.perf_counter() - _t)
-        if rc_l0 == 130:
-            return bail("松爪后脱离")
-        # ② 再斜着收上去到 travel_z
         lift = pull_in(lift, args.lift_pull_r)
-        if abs(lift[0] - pl6[0]) + abs(lift[1] - pl6[1]) > 3.0:
+        need_pull = abs(lift[0] - pl6[0]) + abs(lift[1] - pl6[1]) > 3.0
+        if need_pull:
+            _lift0 = np.array([pl6[0], pl6[1], min(travel_z, pl6[2] + 25.0)])
+            _t = time.perf_counter()
+            rc_l0, act_l0 = lift_to(_lift0, args, tol=max(args.tol, 22.0),
+                                    min_z=clear_z)
+            record("place_clear", time.perf_counter() - _t)
+            if rc_l0 == 130:
+                return bail("松爪后脱离")
+        if need_pull:
             print("  伸展位形（半径 %.0fmm）→ 松爪后斜着往回收再抬升到 z=%.0f"
                   % (float(np.hypot(pl6[0], pl6[1])), travel_z))
         _t = time.perf_counter()
@@ -2133,7 +2132,7 @@ def main():
     # 而下面紧接着就把 2~22 mm 的误差判成"抓稳"了 —— 说明本来就预期到不了。
     # 空爪到底要 3.4 秒（move_ms 3000 + 驱动 400 ms 缓冲），5 秒刚好留一点余量。
     _t = time.perf_counter()
-    _grasp_mm = float(os.environ.get("ROARM_GRASP_MM", "40.0"))
+    _grasp_mm = float(os.environ.get("ROARM_GRASP_MM", "30.0"))
     _grasp_deg = params.deg_of_gap(_grasp_mm)
     _rc_g, _out_g = run_cli(
         ["grip_deg", "%.1f" % _grasp_deg, "--wait", "%.1f" % GRIP_WAIT, "--tol", "5.0"],

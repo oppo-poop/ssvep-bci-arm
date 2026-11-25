@@ -83,7 +83,7 @@ mod.parse_actual = lambda out: None
 mod.parse_err = lambda out: 0.0          # 触发不了 settle 复查
 
 real_cli_pose = mod.cli_pose
-TGT = [571.0, 181.0, 72.0]               # 日志里的投放点 link6(mm)
+TGT = [571.0, 181.0, 40.0]               # 日志里的投放点 link6(mm)
 
 rc, _ = quiet(real_cli_pose, TGT, 90.0, 15.0, True, False)
 check("--force" in captured[-1],

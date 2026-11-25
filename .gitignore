@@ -1,20 +1,11 @@
-# 回收站（临时日志，曾误入暂存区 305 项）
+# 系统与编辑器
 .Trash-0/
-
-# 工具与记忆目录
 .workbuddy/
 .claude/
 .vscode/
-
-# 第三方 SDK 与参考实现（176 MB）
 参考资料/
 
-# star-arm-moveit2 已并入本仓库（原为独立仓库，2026-10-19 合并）
-# 它自己的 .gitignore 会排除 build/ install/ log/；下面三条管的是**仓库根**的同名目录。
-# 根这三个是 2026-11-08 在仓库根误跑了一次 colcon 留下的产物，脚本从不引用
-# （robot_up.sh / sim_up.sh 里的 WS 恒指 star-arm-moveit2），但一直没被忽略，
-# `git status -uall` 里挂着 320 个未跟踪文件 —— 一次 `git add .` 就会把 33 MB
-# 二进制写进历史，而 git 历史不可逆。加前导斜杠 = 只匹配仓库根，不误伤子目录。
+# 仓库根误构建产物（真实工作区在 star-arm-moveit2/）
 /build/
 /install/
 /log/
@@ -23,36 +14,25 @@
 __pycache__/
 *.pyc
 
-# 运行产物
+# 进程与临时备份
 *.log
+*.bak
+*.bak_*
 .sim.pids
 .robot.pids
 
-# 取放连跑的逐次日志（26+ 个）；只保留 summary.csv 这一张汇总表
-data/runs/*.log
+# 运行期产物全部忽略（仅保留 .gitkeep 与 runs/summary.csv）
+runtime/*
+!runtime/.gitkeep
+!runtime/runs/
+runtime/runs/*
+!runtime/runs/summary.csv
 
-# 标定文件的临时备份（fix_extrinsics 生成）
-# `*.bak` 盖不住带日期的 `xxx.bak_1104` —— 2026-11-19 发现两个这种文件
-# 裸露在未跟踪区，`git add .` 会把它们一起带进历史。
-*.bak
-*.bak_*
-
-# 抓取日志：运行时逐条追加，进仓库只会不断冲突
-data/vision/pick_log.csv
-# 同上，但这是**仓库根 data/** 下的那两份（2026-11-19 发现漏了根目录）
-data/pick_log.csv
-data/probe_points.csv
-
-# 阶段 0 计时日志（pick.py / arm_service.py 追加）
-data/vision/timing.jsonl
-
-# 视觉运行产物（诊断图/采集图/中间样本）
-data/vision/preview/
-data/vision/calib_images/
-data/vision/calib_intrinsics_raw.npz
-data/vision/handeye_samples.npz
-data/vision/probe_points.csv
-scripts/output/
-
-# 8 指令服务的 Unix socket
-data/*.sock
+# 标定过程中的中间样本与原始采集图（不入库）
+config/calibrated/camera/handeye_samples.npz
+config/calibrated/camera/calib_intrinsics_raw.npz
+config/calibrated/camera/calib_images/
+config/calibrated/camera/preview/
+config/calibrated/camera/pick_log.csv
+config/calibrated/camera/timing.jsonl
+config/calibrated/camera/probe_points.csv
