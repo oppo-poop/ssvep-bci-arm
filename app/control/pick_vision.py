@@ -2260,6 +2260,31 @@ def main():
                 print("  后退 %.0f mm 到 link6 (%+.0f, %+.0f, %+.0f)，"
                       "投放区应该看得见了" % (moved, *act))
 
+    # ---- 5.5-auto) --auto-place 实时动态识别同色托盘（不依赖固定 trays.json）
+    if args.auto_place and args.drop_u is None and args.drop_v is None:
+        _vcfg = json.loads(paths.VISION_JSON.read_text(encoding="utf-8"))
+        _tr = _vcfg.get("colors", {}).get(args.color, {}).get("tray", [])
+        if _tr:
+            _hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            _m = np.zeros(_hsv.shape[:2], np.uint8)
+            for _lo, _hi in _tr:
+                _m |= cv2.inRange(_hsv, tuple(_lo), tuple(_hi))
+            # 挖掉刚抓走物料的区域（半径 75px），避免同色物料与托盘互相干扰
+            _pu, _pv = int(round(uv[0])), int(round(uv[1]))
+            cv2.circle(_m, (_pu, _pv), 75, 0, -1)
+            _m = cv2.morphologyEx(_m, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+            _m = cv2.morphologyEx(_m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+            _n, _, _st, _ct = cv2.connectedComponentsWithStats(_m, 8)
+            _best = max(((int(_st[i, cv2.CC_STAT_AREA]), _ct[i]) for i in range(1, _n)),
+                        default=(0, None), key=lambda x: x[0])
+            if _best[0] >= 1500:
+                args.drop_u, args.drop_v = float(_best[1][0]), float(_best[1][1])
+                print("  自动投放：实时识别 %s 托盘像素 (%.0f, %.0f) area=%d"
+                      % (args.color, args.drop_u, args.drop_v, _best[0]))
+            else:
+                print("  ⚠ 未识别到 %s 托盘（最大块 %d px），请用 tune_colors.py --color %s --kind tray 调阈值"
+                      % (args.color, _best[0], args.color))
+
     # ---- 5.5a) 外部给定投放像素（脑电选点 / 上位机调用）：不弹窗、不点选
     manual_slot = None          # 物料坐标（mm），None = 走 --place 的自动规则
     if args.drop_u is not None and args.drop_v is not None:
