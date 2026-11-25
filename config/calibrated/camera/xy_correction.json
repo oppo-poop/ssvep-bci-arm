@@ -1,0 +1,28 @@
+{
+  "A": [
+    [
+      1.0,
+      -0.034
+    ],
+    [
+      0.0,
+      0.972
+    ]
+  ],
+  "b": [
+    0.0,
+    0.0
+  ],
+  "p0": [
+    480.0,
+    296.0
+  ],
+  "rms_mm": 0.0,
+  "source": "2026-11-25 2deg yaw trim: left(y=+296)=0mm, mid/right(y<=0)=+10..12mm",
+  "points": [],
+  "right_dy_mm": 0.0,
+  "right_full_at_mm": -60.0,
+  "place_dx_mm": 0.0,
+  "place_dy_mm": 0.0,
+  "place_dz_mm": 0.0
+}

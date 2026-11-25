@@ -1,0 +1,17 @@
+{
+  "offset_mm": [
+    -1.9,
+    -79.0,
+    -37.8
+  ],
+  "n": 4,
+  "std_mm": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "rms_mm": 0.0,
+  "updated": "2026-11-25 13:37:36",
+  "source": "2026-11-25 35mm riser z_g=-0.010 two-point probe centered",
+  "note": "⚠ 不要再用 gripper_offset_calib.py 覆盖：它算的是 mean(act-obj)，没有信息量。⚠ 改 off_x/off_z 后必须同步 cap/vision_arm_color.py 的 GRASP_D_MM = (off_z, -off_x)，当前应为 (79.2, -32.1)。校验：用本文件 + xy_correction 算出的 link6 在 probe 两点为 (517.4,-279.5)/(501.3,290.3)，与当时目测对齐位置一致。"
+}

@@ -1,0 +1,3 @@
+{"ts": "2026-11-22 11:03:35", "source": "service", "event": "abort", "s": 0.0, "hit": 1, "reason": "断开"}
+{"ts": "2026-11-23 05:56:44", "source": "service", "event": "abort", "s": 0.0, "hit": 1, "reason": "断开"}
+{"ts": "2026-11-23 05:57:11", "source": "service", "event": "abort", "s": 0.0, "hit": 1, "reason": "断开"}

@@ -23,7 +23,7 @@ def _repo_root() -> Path:
         return Path(env).expanduser().resolve()
     here = Path(__file__).resolve()
     for base in here.parents:
-        if (base / "scripts" / "roarm_cli.py").is_file():
+        if (base / "app" / "core" / "params.py").is_file() or (base / "scripts" / "roarm_cli.py").is_file():
             return base
     raise RuntimeError(
         "找不到仓库根（scripts/roarm_cli.py）；用 ROARM_ROOT 指定")
@@ -35,7 +35,7 @@ def _load_params():
     任务层可能运行在 install/build 拷贝里，不能假设 scripts 在 sys.path 上；
     按路径显式加载，保证和脚本侧读的是同一份 config/robot.json。
     """
-    path = _repo_root() / "scripts" / "roarm_lib" / "params.py"
+    path = _repo_root() / "app" / "core" / "params.py"
     spec = importlib.util.spec_from_file_location("_roarm_params", path)
     if spec is None or spec.loader is None:
         raise RuntimeError("无法加载 %s" % path)
@@ -53,7 +53,7 @@ def _find_cli() -> Path:
     env = os.environ.get("ROARM_CLI")
     if env:
         return Path(env).expanduser()
-    return _repo_root() / "scripts" / "roarm_cli.py"
+    return _repo_root() / "app" / "control" / "roarm_cli.py"
 
 
 #: 终端控臂脚本，任务层通过子进程调用它。

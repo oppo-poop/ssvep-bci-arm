@@ -1,3 +1,5 @@
+> **2026-11 阶段 1 目录重构说明**：静态配置与标定产物已分离至 `config/static/` 与 `config/calibrated/{arm,camera}/`；上位机业务代码迁至 `app/{core,perception,control,service}/`；启停、标定与诊断工具迁至 `tools/{bringup,calib,diag,setup}/`；离线回归迁至 `tests/check_all.sh`；`scripts/` 仅保留 3 个给 `ssvep-bci` 的兼容 shim。
+
 # 架构与分层
 
 > 一句话：ROS 2 负责“机器怎么动”，`scripts/` 负责“人怎么用”。
